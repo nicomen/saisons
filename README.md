@@ -66,8 +66,8 @@ make fatpack
 Perl is pre-installed on macOS. The curl method works as-is:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o /usr/local/bin/saisons
-chmod +x /usr/local/bin/saisons
+curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o ~/.local/bin/saisons
+chmod +x ~/.local/bin/saisons
 ```
 
 Or via the installer:
