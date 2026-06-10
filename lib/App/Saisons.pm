@@ -1,4 +1,4 @@
-package Saisons;
+package App::Saisons;
 use strict;
 use warnings;
 

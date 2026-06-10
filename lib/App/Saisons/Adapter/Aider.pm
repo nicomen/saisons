@@ -1,8 +1,8 @@
-package Saisons::Adapter::Aider;
+package App::Saisons::Adapter::Aider;
 use strict;
 use warnings;
 use POSIX qw();
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 # Aider stores chat history in .aider.chat.history.md files, one per directory.
 # Each file contains multiple sessions separated by:
@@ -82,7 +82,7 @@ sub launch {
     for my $cwd (keys %by_cwd) {
         # --restore-chat-history replays the previous conversation into context
         my $cmd = "cd \Q$cwd\E && aider --restore-chat-history";
-        Saisons::Launcher::launch_cmd($cmd, $cwd, $launcher, 'aider');
+        App::Saisons::Launcher::launch_cmd($cmd, $cwd, $launcher, 'aider');
     }
 }
 

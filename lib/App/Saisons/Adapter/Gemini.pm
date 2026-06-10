@@ -1,9 +1,9 @@
-package Saisons::Adapter::Gemini;
+package App::Saisons::Adapter::Gemini;
 use strict;
 use warnings;
 use JSON::PP ();
 use POSIX qw();
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 # Gemini CLI stores sessions under ~/.gemini/tmp/<project-slug>/chats/
 # Each file is named: session-YYYY-MM-DDTHH-MM-<uuid8>.jsonl
@@ -48,7 +48,7 @@ sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
         my $cmd = "cd \Q$s->{cwd}\E && gemini --resume \Q$s->{id}\E";
-        Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+        App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
 

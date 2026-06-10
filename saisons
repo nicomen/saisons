@@ -5,6 +5,1963 @@
 BEGIN {
 my %fatpacked;
 
+$fatpacked{"App/Saisons.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS';
+  package App::Saisons;
+  use strict;
+  use warnings;
+  
+  our $VERSION = '0.1.0';
+  
+  1;
+APP_SAISONS
+
+$fatpacked{"App/Saisons/Adapter/Aider.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_ADAPTER_AIDER';
+  package App::Saisons::Adapter::Aider;
+  use strict;
+  use warnings;
+  use POSIX qw();
+  use App::Saisons::Launcher ();
+  
+  # Aider stores chat history in .aider.chat.history.md files, one per directory.
+  # Each file contains multiple sessions separated by:
+  #   # aider chat started at YYYY-MM-DD HH:MM:SS
+  #
+  # Since Aider has no UUID-based session IDs, we synthesize one from the
+  # directory path + session start timestamp.
+  
+  sub new { bless {}, shift }
+  
+  sub name      { 'Aider' }
+  sub tag       { "a Aid" }
+  sub tag_color { 'bold green' }
+  
+  sub find_sessions {
+      my ($self) = @_;
+  
+      my @search_dirs;
+      if (my $env = $ENV{SAISONS_SEARCH_DIRS}) {
+          @search_dirs = split /:/, $env;
+      }
+      else {
+          my $home = $ENV{HOME};
+          @search_dirs = grep { -d $_ }
+              map { "$home/$_" } qw(projects dev src work code),
+              '/projects';
+      }
+      my @history_files = _find_history_files(\@search_dirs, 1);
+  
+      # Also check $HOME directly — aider run from home produces ~/.aider.chat.history.md
+      my $home_file = "$ENV{HOME}/.aider.chat.history.md";
+      push @history_files, $home_file if -f $home_file;
+  
+      my @sessions;
+      for my $file (@history_files) {
+          (my $cwd = $file) =~ s|/\.aider\.chat\.history\.md$||;
+          push @sessions, _parse_history_file($file, $cwd, $self);
+      }
+  
+      return @sessions;
+  }
+  
+  sub _find_history_files {
+      my ($roots, $maxdepth) = @_;
+      my @result;
+      my @queue = map { [$_, 0] } @$roots;
+      while (my $item = shift @queue) {
+          my ($dir, $depth) = @$item;
+          opendir my $dh, $dir or next;
+          for my $entry (readdir $dh) {
+              next if $entry eq '.' || $entry eq '..';
+              my $path = "$dir/$entry";
+              if (-f $path && $entry eq '.aider.chat.history.md') {
+                  push @result, $path;
+              }
+              elsif (-d $path && !-l $path && $depth < $maxdepth) {
+                  push @queue, [$path, $depth + 1];
+              }
+          }
+          closedir $dh;
+      }
+      return @result;
+  }
+  
+  sub running {
+      # Aider doesn't maintain a running-sessions registry like Claude does
+      return ();
+  }
+  
+  sub launch {
+      my ($self, $sessions, $launcher) = @_;
+  
+      # Group by cwd — open one aider session per unique directory
+      my %by_cwd;
+      push @{ $by_cwd{$_->{cwd}} }, $_ for @$sessions;
+  
+      for my $cwd (keys %by_cwd) {
+          # --restore-chat-history replays the previous conversation into context
+          my $cmd = "cd \Q$cwd\E && aider --restore-chat-history";
+          App::Saisons::Launcher::launch_cmd($cmd, $cwd, $launcher, 'aider');
+      }
+  }
+  
+  sub delete_session {
+      my ($self, $session) = @_;
+      # Aider sessions can't be individually deleted without rewriting the file.
+      # We rewrite the file excluding this session's block.
+      my $file = $session->{_file};
+      open my $fh, '<', $file or return 0;
+      my $content = do { local $/; <$fh> };
+      close $fh;
+  
+      # Remove the session block — from its header line up to (but not including)
+      # the next session header, or end of file
+      my $header = quotemeta($session->{_header});
+      $content =~ s/^$header\n.*?(?=^# aider chat started at |\z)//ms;
+  
+      open $fh, '>', $file or return 0;
+      print $fh $content;
+      close $fh;
+      return 1;
+  }
+  
+  sub load_messages {
+      my ($self, $session) = @_;
+      my @messages;
+      my $in_session = 0;
+  
+      open my $fh, '<', $session->{_file} or return @messages;
+      while (my $line = <$fh>) {
+          chomp $line;
+  
+          # Detect start of our session
+          if ($line eq $session->{_header}) {
+              $in_session = 1;
+              next;
+          }
+  
+          # Detect start of next session — stop
+          last if $in_session && $line =~ /^# aider chat started at /;
+  
+          next unless $in_session;
+  
+          # User messages start with ####
+          if ($line =~ /^#### (.+)$/) {
+              push @messages, { role => 'user', text => $1 };
+          }
+          # Assistant responses are plain text lines (not starting with > or #)
+          elsif ($line =~ /^[^>#\s]/ && @messages && $messages[-1]{role} eq 'user') {
+              push @messages, { role => 'assistant', text => $line };
+          }
+          elsif (@messages && $messages[-1]{role} eq 'assistant' && $line !~ /^>/) {
+              $messages[-1]{text} .= "\n$line";
+          }
+      }
+      close $fh;
+  
+      # Clean up trailing whitespace from assistant messages
+      for my $m (@messages) {
+          $m->{text} =~ s/\s+$//;
+      }
+  
+      return @messages;
+  }
+  
+  # ── private helpers ───────────────────────────────────────────────────────────
+  
+  sub _parse_history_file {
+      my ($file, $cwd, $adapter) = @_;
+      my @sessions;
+  
+      open my $fh, '<', $file or return @sessions;
+  
+      my ($header, $date, $epoch, $title, @lines);
+  
+      while (my $line = <$fh>) {
+          chomp $line;
+  
+          if ($line =~ /^# aider chat started at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$/) {
+              # Save previous session if any
+              if ($header) {
+                  push @sessions, _make_session($header, $date, $epoch, $cwd, $file, \@lines, $adapter);
+              }
+              $date   = $1;
+              $header = $line;
+              $epoch  = _parse_epoch($date);
+              @lines  = ();
+              $title  = undef;
+              next;
+          }
+  
+          next unless $header;
+          push @lines, $line;
+  
+          # First user message becomes the title
+          if (!$title && $line =~ /^#### (.+)$/) {
+              $title = $1;
+          }
+      }
+      close $fh;
+  
+      # Save last session
+      push @sessions, _make_session($header, $date, $epoch, $cwd, $file, \@lines, $adapter)
+          if $header;
+  
+      return @sessions;
+  }
+  
+  sub _make_session {
+      my ($header, $date, $epoch, $cwd, $file, $lines, $adapter) = @_;
+  
+      # Synthesize a stable UUID-like ID from directory path + timestamp.
+      # We encode the cwd as a hex string in the first 3 segments and the
+      # epoch seconds in the last 2, giving a unique ID per session.
+      my $cwd_sum = 0;
+      $cwd_sum = ($cwd_sum * 31 + ord($_)) & 0xFFFFFFFF for split //, $cwd;
+      my $id = sprintf('%08x-%04x-%04x-%04x-%012x',
+          $cwd_sum,
+          ($cwd_sum >> 16) & 0xFFFF,
+          ($epoch >> 16)   & 0xFFFF,
+          $epoch           & 0xFFFF,
+          $epoch);
+  
+      # First user message as title, fallback to date
+      my ($title) = grep { /^#### / } @$lines;
+      $title = $title ? $title =~ s/^#### //r : "(no messages)";
+  
+      # Approximate size: number of lines in this session's block
+      my $size = length(join "\n", @$lines);
+  
+      return {
+          id       => $id,
+          title    => $title,
+          date     => $date,
+          epoch    => $epoch,
+          cwd      => $cwd,
+          project  => $cwd,
+          _file    => $file,
+          _header  => $header,
+          _size    => $size,
+          _adapter => $adapter,
+      };
+  }
+  
+  sub _parse_epoch {
+      my ($date) = @_;  # "YYYY-MM-DD HH:MM:SS"
+      return 0 unless $date =~ /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+      return POSIX::mktime($6, $5, $4, $3, $2-1, $1-1900);
+  }
+  
+  1;
+APP_SAISONS_ADAPTER_AIDER
+
+$fatpacked{"App/Saisons/Adapter/Claude.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_ADAPTER_CLAUDE';
+  package App::Saisons::Adapter::Claude;
+  use strict;
+  use warnings;
+  use JSON::PP;
+  use POSIX qw();
+  use App::Saisons::Launcher ();
+  
+  # An adapter must implement:
+  #   name()          -> display name string
+  #   find_sessions() -> list of session hashrefs
+  #   running()       -> hashref { session_id => 1 }
+  #   launch($sessions_aref, $launcher) -> opens sessions
+  #   delete_session($session) -> removes session file
+  #   load_messages($session) -> list of { role, text }
+  
+  sub new { bless {}, shift }
+  
+  sub name      { 'Claude Code' }
+  sub tag       { "\x{2736} Cld" }
+  sub tag_color { 'bold red' }
+  
+  sub find_sessions {
+      my ($self) = @_;
+      my $projects_dir = "$ENV{HOME}/.claude/projects";
+  
+      # Build a lookup of session ID -> name from running session files.
+      # Used as fallback title for sessions that haven't ended yet (no aiTitle).
+      my %running_names;
+      my $sessions_dir = "$ENV{HOME}/.claude/sessions";
+      if (opendir my $sdh, $sessions_dir) {
+          while (my $f = readdir $sdh) {
+              next unless $f =~ /^\d+\.json$/;
+              open my $fh, '<', "$sessions_dir/$f" or next;
+              my $json = do { local $/; <$fh> };
+              close $fh;
+              my $obj = eval { decode_json($json) } or next;
+              next unless $obj->{sessionId} && $obj->{name};
+              $running_names{ $obj->{sessionId} } = $obj->{name};
+          }
+          closedir $sdh;
+      }
+  
+      my @sessions;
+  
+      opendir my $dh, $projects_dir or return @sessions;
+      for my $project (sort readdir $dh) {
+          next if $project =~ /^\./;
+          my $dir = "$projects_dir/$project";
+          next unless -d $dir;
+          opendir my $pdh, $dir or next;
+          for my $file (sort readdir $pdh) {
+              next unless $file =~ /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
+              my $id = $1;
+              my ($title, $date, $epoch, $cwd, $first_msg) = _extract_meta("$dir/$file");
+              $cwd //= _derive_path($project);
+              # title priority: aiTitle → running session name → first user message → default
+              $title //= $running_names{$id} // $first_msg // '(no title)';
+              my $size = -s "$dir/$file" // 0;
+              push @sessions, {
+                  id       => $id,
+                  project  => $project,
+                  cwd      => $cwd,
+                  title    => $title,
+                  date     => $date,
+                  epoch    => $epoch,
+                  _file    => "$dir/$file",
+                  _size    => $size,
+                  _adapter => $self,
+              };
+          }
+          closedir $pdh;
+      }
+      closedir $dh;
+      return @sessions;
+  }
+  
+  sub running {
+      my ($self) = @_;
+      my %running;
+      my $sessions_dir = "$ENV{HOME}/.claude/sessions";
+      opendir my $sdh, $sessions_dir or return %running;
+      while (my $f = readdir $sdh) {
+          next unless $f =~ /^\d+\.json$/;
+          open my $fh, '<', "$sessions_dir/$f" or next;
+          my $json = do { local $/; <$fh> };
+          close $fh;
+          my $obj = eval { decode_json($json) } or next;
+          my $pid = $obj->{pid}       or next;
+          my $sid = $obj->{sessionId} or next;
+          next unless kill(0, $pid);
+          $running{$sid} = 1;
+      }
+      closedir $sdh;
+      return %running;
+  }
+  
+  sub launch {
+      my ($self, $sessions, $launcher) = @_;
+      for my $s (@$sessions) {
+          my $cmd = "cd \Q$s->{cwd}\E && claude --resume \Q$s->{id}\E";
+          App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+      }
+  }
+  
+  sub delete_session {
+      my ($self, $session) = @_;
+      return unlink $session->{_file};
+  }
+  
+  sub move_session {
+      my ($self, $session, $new_cwd) = @_;
+      my $projects_dir = "$ENV{HOME}/.claude/projects";
+      my $old_cwd      = $session->{cwd};
+      my $old_file     = $session->{_file};
+  
+      # Encode new cwd as project dir name (/ -> -)
+      (my $new_project = $new_cwd) =~ s|/|-|g;
+      $new_project =~ s/^-//;  # strip leading -
+      $new_project = "-$new_project";
+  
+      my $new_dir  = "$projects_dir/$new_project";
+      my $new_file = "$new_dir/$session->{id}.jsonl";
+  
+      # Create target project dir if needed
+      unless (-d $new_dir) {
+          mkdir $new_dir or return (0, "Cannot create $new_dir: $!");
+      }
+  
+      # Rewrite cwd in every line of the jsonl and write to new location
+      open my $in,  '<', $old_file or return (0, "Cannot read $old_file: $!");
+      open my $out, '>', $new_file or return (0, "Cannot write $new_file: $!");
+      my $old_quoted = quotemeta($old_cwd);
+      while (my $line = <$in>) {
+          $line =~ s/"cwd":"$old_quoted"/"cwd":"$new_cwd"/g;
+          print $out $line;
+      }
+      close $in;
+      close $out;
+  
+      # Remove old file; remove old project dir if now empty
+      unlink $old_file;
+      my $old_dir = "$projects_dir/$session->{project}";
+      opendir my $dh, $old_dir or return (1, '');
+      my @remaining = grep { !/^\./ } readdir $dh;
+      closedir $dh;
+      rmdir $old_dir unless @remaining;
+  
+      # Update session record in place
+      $session->{cwd}     = $new_cwd;
+      $session->{project} = $new_project;
+      $session->{_file}   = $new_file;
+  
+      return (1, '');
+  }
+  
+  sub load_messages {
+      my ($self, $session) = @_;
+      my @messages;
+      open my $fh, '<', $session->{_file} or return @messages;
+      while (<$fh>) {
+          next unless /"role":"(user|assistant)"/;
+          my $role = $1;
+          my $obj  = eval { decode_json($_) } or next;
+          my $content = $obj->{message}{content} // next;
+          my $text = '';
+          if (!ref $content) {
+              $text = $content;
+          }
+          elsif (ref $content eq 'ARRAY') {
+              for my $block (@$content) {
+                  next unless ref $block eq 'HASH' && ($block->{type} // '') eq 'text';
+                  $text .= $block->{text};
+              }
+          }
+          next unless length $text;
+          push @messages, { role => $role, text => $text };
+      }
+      close $fh;
+      return @messages;
+  }
+  
+  # ── private helpers ───────────────────────────────────────────────────────────
+  
+  sub _extract_meta {
+      my ($file) = @_;
+      my ($title, $date, $epoch, $cwd, $first_msg) = (undef, '0000-00-00', 0, undef, undef);
+      print STDERR "\033[2KLoading $file ...\r";
+      open my $fh, '<', $file or return ($title, $date, $epoch, $cwd);
+      while (<$fh>) {
+          $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
+          $cwd   = $1 if !$cwd && /"cwd":"([^"]+)"/;
+          # Capture first real user message as fallback title.
+          # Skip the context-continuation boilerplate Claude injects when a session
+          # hits the context limit.
+          if (!$first_msg && /"role":"user"/) {
+              my $obj = eval { decode_json($_) } or next;
+              my $c   = $obj->{message}{content};
+              my $txt = ref $c eq 'ARRAY' ? ($c->[0]{text} // '') : ($c // '');
+              next if $txt =~ /^This session is being continued from a previous conversation/;
+              ($first_msg) = split /\n/, $txt if length $txt;
+          }
+          if (/"timestamp":"(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
+              my $ts = "$1T$2:$3:$4";
+              if ($ts gt $date) {
+                  $date  = $ts;
+                  $epoch = POSIX::mktime($4, $3, $2,
+                      substr($1,8,2), substr($1,5,2)-1, substr($1,0,4)-1900);
+              }
+          }
+      }
+      close $fh;
+      print STDERR "\033[2K\r";
+      return ($title, $date, $epoch, $cwd, $first_msg);
+  }
+  
+  sub _derive_path {
+      my ($project) = @_;
+      (my $path = $project) =~ s/^-/\//;
+      $path =~ s/-/\//g;
+      return $path;
+  }
+  
+  1;
+APP_SAISONS_ADAPTER_CLAUDE
+
+$fatpacked{"App/Saisons/Adapter/Codex.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_ADAPTER_CODEX';
+  package App::Saisons::Adapter::Codex;
+  use strict;
+  use warnings;
+  use JSON::PP ();
+  use POSIX qw();
+  use App::Saisons::Launcher ();
+  
+  # Codex CLI stores sessions under ~/.codex/sessions/YYYY/MM/DD/
+  # Each file is named: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
+  # First line is a SessionMeta JSON object with id, cwd, etc.
+  # Subsequent lines are ResponseItem / EventMsg objects with conversation turns.
+  # Resume with: codex resume <path>
+  
+  sub new { bless {}, shift }
+  
+  sub name      { 'Codex' }
+  sub tag       { "\x{2601} Cdx" }
+  sub tag_color { 'bold cyan' }
+  
+  sub find_sessions {
+      my ($self) = @_;
+      my $root = $ENV{CODEX_HOME} // "$ENV{HOME}/.codex";
+      my $sessions_dir = "$root/sessions";
+      return () unless -d $sessions_dir;
+  
+      my @files = _find_session_files($sessions_dir);
+      my @sessions;
+      for my $file (@files) {
+          my $s = _parse_session($file, $self) or next;
+          push @sessions, $s;
+      }
+      return @sessions;
+  }
+  
+  sub running {
+      # Codex has no running-session registry we can check without shelling out
+      return ();
+  }
+  
+  sub launch {
+      my ($self, $sessions, $launcher) = @_;
+      for my $s (@$sessions) {
+          my $cmd = "cd \Q$s->{cwd}\E && codex resume \Q$s->{_file}\E";
+          App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+      }
+  }
+  
+  sub delete_session {
+      my ($self, $session) = @_;
+      return unlink $session->{_file};
+  }
+  
+  sub load_messages {
+      my ($self, $session) = @_;
+      my @messages;
+      open my $fh, '<', $session->{_file} or return @messages;
+      while (my $line = <$fh>) {
+          my $obj     = eval { JSON::PP::decode_json($line) } or next;
+          my $type    = $obj->{type}    // '';
+          my $payload = $obj->{payload} // {};
+  
+          if ($type eq 'event_msg' && ($payload->{type} // '') eq 'user_message') {
+              my $text = $payload->{message} // '';
+              push @messages, { role => 'user', text => $text } if length $text;
+          }
+          elsif ($type eq 'response_item' && ($payload->{role} // '') eq 'assistant') {
+              my $text = _extract_text($payload->{content});
+              push @messages, { role => 'assistant', text => $text } if length $text;
+          }
+      }
+      close $fh;
+      return @messages;
+  }
+  
+  # ── private helpers ───────────────────────────────────────────────────────────
+  
+  # Walk the date-sharded sessions directory: sessions/YYYY/MM/DD/*.jsonl
+  sub _find_session_files {
+      my ($root) = @_;
+      my @files;
+      opendir my $dh, $root or return @files;
+      for my $year (sort readdir $dh) {
+          next unless $year =~ /^\d{4}$/;
+          my $ydir = "$root/$year";
+          opendir my $mdh, $ydir or next;
+          for my $month (sort readdir $mdh) {
+              next unless $month =~ /^\d{2}$/;
+              my $mdir = "$ydir/$month";
+              opendir my $ddh, $mdir or next;
+              for my $day (sort readdir $ddh) {
+                  next unless $day =~ /^\d{2}$/;
+                  my $ddir = "$mdir/$day";
+                  opendir my $fdh, $ddir or next;
+                  for my $file (sort readdir $fdh) {
+                      next unless $file =~ /^rollout-.*\.jsonl$/;
+                      push @files, "$ddir/$file";
+                  }
+                  closedir $fdh;
+              }
+              closedir $ddh;
+          }
+          closedir $mdh;
+      }
+      closedir $dh;
+  
+      # Also check archived sessions
+      my $archived = "$root/archived_sessions";
+      if (-d $archived) {
+          opendir my $adh, $archived or return @files;
+          for my $file (sort readdir $adh) {
+              next unless $file =~ /^rollout-.*\.jsonl$/;
+              push @files, "$archived/$file";
+          }
+          closedir $adh;
+      }
+  
+      return @files;
+  }
+  
+  sub _parse_session {
+      my ($file, $adapter) = @_;
+  
+      open my $fh, '<', $file or return undef;
+  
+      my ($id, $cwd, $title);
+      while (my $line = <$fh>) {
+          my $obj = eval { JSON::PP::decode_json($line) } or next;
+          my $type    = $obj->{type}    // '';
+          my $payload = $obj->{payload} // {};
+  
+          if ($type eq 'session_meta') {
+              $id  //= $payload->{id};
+              $cwd //= $payload->{cwd};
+          }
+          elsif ($type eq 'event_msg' && ($payload->{type} // '') eq 'user_message') {
+              $title //= $payload->{message};
+          }
+  
+          last if $id && $cwd && $title;
+      }
+      close $fh;
+  
+      return undef unless $id;
+      $cwd   //= $ENV{HOME};
+      $title //= '(no title)';
+  
+      # Parse timestamp from filename: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
+      my ($date_str, $epoch) = ('0000-00-00', 0);
+      if ($file =~ /rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/) {
+          $date_str = "$1-$2-$3T$4:$5:$6";
+          $epoch    = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
+      }
+  
+      return {
+          id       => $id,
+          title    => $title,
+          date     => $date_str,
+          epoch    => $epoch,
+          cwd      => $cwd,
+          project  => $cwd,
+          _file    => $file,
+          _size    => (-s $file) // 0,
+          _adapter => $adapter,
+      };
+  }
+  
+  sub _extract_text {
+      my ($content) = @_;
+      return '' unless defined $content;
+      return $content unless ref $content;
+      return join '', map { ref $_ eq 'HASH' && ($_->{type}//'') eq 'text' ? $_->{text} : '' }
+                      ref $content eq 'ARRAY' ? @$content : ();
+  }
+  
+  1;
+APP_SAISONS_ADAPTER_CODEX
+
+$fatpacked{"App/Saisons/Adapter/Gemini.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_ADAPTER_GEMINI';
+  package App::Saisons::Adapter::Gemini;
+  use strict;
+  use warnings;
+  use JSON::PP ();
+  use POSIX qw();
+  use App::Saisons::Launcher ();
+  
+  # Gemini CLI stores sessions under ~/.gemini/tmp/<project-slug>/chats/
+  # Each file is named: session-YYYY-MM-DDTHH-MM-<uuid8>.jsonl
+  # First line is a metadata record with sessionId, summary, startTime, projectHash.
+  # Subsequent lines are message records with type "user" | "gemini".
+  # Resume with: gemini --resume <UUID>
+  
+  sub new { bless {}, shift }
+  
+  sub name      { 'Gemini' }
+  sub tag       { "\x{2726} Gem" }
+  sub tag_color { 'bold blue' }
+  
+  sub find_sessions {
+      my ($self) = @_;
+      my $tmp = "$ENV{HOME}/.gemini/tmp";
+      return () unless -d $tmp;
+  
+      my @sessions;
+      opendir my $dh, $tmp or return ();
+      for my $slug (readdir $dh) {
+          next if $slug =~ /^\./;
+          my $chats_dir = "$tmp/$slug/chats";
+          next unless -d $chats_dir;
+          opendir my $cdh, $chats_dir or next;
+          for my $file (readdir $cdh) {
+              next unless $file =~ /^session-.*\.jsonl$/;
+              my $s = _parse_session("$chats_dir/$file", $self) or next;
+              push @sessions, $s;
+          }
+          closedir $cdh;
+      }
+      closedir $dh;
+      return @sessions;
+  }
+  
+  sub running {
+      return ();
+  }
+  
+  sub launch {
+      my ($self, $sessions, $launcher) = @_;
+      for my $s (@$sessions) {
+          my $cmd = "cd \Q$s->{cwd}\E && gemini --resume \Q$s->{id}\E";
+          App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+      }
+  }
+  
+  sub delete_session {
+      my ($self, $session) = @_;
+      return unlink $session->{_file};
+  }
+  
+  sub load_messages {
+      my ($self, $session) = @_;
+      my @messages;
+      open my $fh, '<', $session->{_file} or return @messages;
+      my $first = 1;
+      while (my $line = <$fh>) {
+          if ($first) { $first = 0; next }  # skip metadata line
+          my $obj  = eval { JSON::PP::decode_json($line) } or next;
+          my $type = $obj->{type} // '';
+          next unless $type eq 'user' || $type eq 'gemini';
+          my $role = $type eq 'user' ? 'user' : 'assistant';
+          my $text = $obj->{displayContent} // _extract_text($obj->{content});
+          push @messages, { role => $role, text => $text } if length($text // '');
+      }
+      close $fh;
+      return @messages;
+  }
+  
+  # ── private helpers ───────────────────────────────────────────────────────────
+  
+  sub _parse_session {
+      my ($file, $adapter) = @_;
+  
+      open my $fh, '<', $file or return undef;
+  
+      my ($id, $title, $date_str, $epoch, $cwd);
+      my $first = 1;
+      while (my $line = <$fh>) {
+          my $obj = eval { JSON::PP::decode_json($line) } or next;
+  
+          if ($first) {
+              $first = 0;
+              $id  = $obj->{sessionId} or return undef;
+              $title = $obj->{summary} if $obj->{summary};
+  
+              if (my $ts = $obj->{startTime} // $obj->{lastUpdated}) {
+                  if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
+                      $date_str = "$1-$2-$3T$4:$5:$6";
+                      # Timestamps are UTC — convert using timegm equivalent via POSIX
+                      local $ENV{TZ} = 'UTC';
+                      POSIX::tzset();
+                      $epoch = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
+                      delete $ENV{TZ};
+                      POSIX::tzset();
+                  }
+              }
+  
+              $cwd = $ENV{HOME};
+              if (ref $obj->{directories} eq 'ARRAY' && @{ $obj->{directories} }) {
+                  $cwd = $obj->{directories}[0];
+              }
+              next;
+          }
+  
+          # First user message as title fallback
+          if (!$title && ($obj->{type} // '') eq 'user') {
+              my $text = _extract_text($obj->{content});
+              $title = $text if length($text // '');
+              last;
+          }
+      }
+      close $fh;
+  
+      return undef unless $id;
+      $date_str //= '0000-00-00';
+      $epoch    //= 0;
+      $title    //= '(no title)';
+      $cwd      //= $ENV{HOME};
+  
+      return {
+          id       => $id,
+          title    => $title,
+          date     => $date_str,
+          epoch    => $epoch,
+          cwd      => $cwd,
+          project  => $cwd,
+          _file    => $file,
+          _size    => (-s $file) // 0,
+          _adapter => $adapter,
+      };
+  }
+  
+  sub _extract_text {
+      my ($content) = @_;
+      return '' unless defined $content;
+      return $content unless ref $content;
+      if (ref $content eq 'ARRAY') {
+          return join '', map { ref $_ eq 'HASH' ? ($_->{text} // '') : '' } @$content;
+      }
+      return $content->{text} // '';
+  }
+  
+  1;
+APP_SAISONS_ADAPTER_GEMINI
+
+$fatpacked{"App/Saisons/Adapter/Opencode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_ADAPTER_OPENCODE';
+  package App::Saisons::Adapter::Opencode;
+  use strict;
+  use warnings;
+  use JSON::PP ();
+  use POSIX qw();
+  use App::Saisons::Launcher ();
+  
+  # opencode stores sessions under $XDG_DATA_HOME/opencode/storage/session/<projectID>/
+  # Each session is a directory containing message JSON files.
+  # The session metadata is in a file named with the session UUID.
+  # Resume with: opencode --session <sessionID>
+  
+  sub new { bless {}, shift }
+  
+  sub name      { 'opencode' }
+  sub tag       { "\x{2336} Opc" }
+  sub tag_color { 'bold magenta' }
+  
+  sub find_sessions {
+      my ($self) = @_;
+      my $data_home = $ENV{XDG_DATA_HOME} // "$ENV{HOME}/.local/share";
+      my $storage   = "$data_home/opencode/storage/session";
+      return () unless -d $storage;
+  
+      my @sessions;
+      opendir my $dh, $storage or return ();
+      for my $project_id (readdir $dh) {
+          next if $project_id =~ /^\./;
+          my $project_dir = "$storage/$project_id";
+          next unless -d $project_dir;
+          opendir my $pdh, $project_dir or next;
+          for my $file (readdir $pdh) {
+              next if $file =~ /^\./;
+              my $path = "$project_dir/$file";
+              next unless -f $path && $file =~ /\.json$/;
+              my $s = _parse_session($path, $self) or next;
+              push @sessions, $s;
+          }
+          closedir $pdh;
+      }
+      closedir $dh;
+      return @sessions;
+  }
+  
+  sub running {
+      return ();
+  }
+  
+  sub launch {
+      my ($self, $sessions, $launcher) = @_;
+      for my $s (@$sessions) {
+          my $cmd = "cd \Q$s->{cwd}\E && opencode --session \Q$s->{id}\E";
+          App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+      }
+  }
+  
+  sub delete_session {
+      my ($self, $session) = @_;
+      return unlink $session->{_file};
+  }
+  
+  sub load_messages {
+      my ($self, $session) = @_;
+      my @messages;
+      open my $fh, '<', $session->{_file} or return @messages;
+      my $json = do { local $/; <$fh> };
+      close $fh;
+      my $obj = eval { JSON::PP::decode_json($json) } or return @messages;
+  
+      my $msgs = $obj->{messages} // [];
+      for my $msg (@$msgs) {
+          my $role = $msg->{role} // '';
+          next unless $role eq 'user' || $role eq 'assistant';
+          my $text = _extract_text($msg->{content});
+          push @messages, { role => $role, text => $text } if length($text // '');
+      }
+      return @messages;
+  }
+  
+  # ── private helpers ───────────────────────────────────────────────────────────
+  
+  sub _parse_session {
+      my ($file, $adapter) = @_;
+  
+      open my $fh, '<', $file or return undef;
+      my $json = do { local $/; <$fh> };
+      close $fh;
+      my $obj = eval { JSON::PP::decode_json($json) } or return undef;
+  
+      my $id  = $obj->{id}  or return undef;
+      my $cwd = $obj->{cwd} // $ENV{HOME};
+  
+      my $title = $obj->{title} // $obj->{summary};
+      if (!$title) {
+          for my $msg (@{ $obj->{messages} // [] }) {
+              next unless ($msg->{role} // '') eq 'user';
+              $title = _extract_text($msg->{content});
+              last if length($title // '');
+          }
+      }
+      $title //= '(no title)';
+  
+      my ($date_str, $epoch) = ('0000-00-00', 0);
+      if (my $ts = $obj->{createdAt} // $obj->{updatedAt}) {
+          if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
+              $date_str = "$1-$2-$3T$4:$5:$6";
+              local $ENV{TZ} = 'UTC';
+              POSIX::tzset();
+              $epoch = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
+              delete $ENV{TZ};
+              POSIX::tzset();
+          }
+      }
+  
+      return {
+          id       => $id,
+          title    => $title,
+          date     => $date_str,
+          epoch    => $epoch,
+          cwd      => $cwd,
+          project  => $cwd,
+          _file    => $file,
+          _size    => (-s $file) // 0,
+          _adapter => $adapter,
+      };
+  }
+  
+  sub _extract_text {
+      my ($content) = @_;
+      return '' unless defined $content;
+      return $content unless ref $content;
+      if (ref $content eq 'ARRAY') {
+          return join '', map {
+              ref $_ eq 'HASH' ? ($_->{text} // '') : (ref $_ ? '' : $_)
+          } @$content;
+      }
+      return $content->{text} // '';
+  }
+  
+  1;
+APP_SAISONS_ADAPTER_OPENCODE
+
+$fatpacked{"App/Saisons/Launcher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_LAUNCHER';
+  package App::Saisons::Launcher;
+  use strict;
+  use warnings;
+  
+  # Launch a shell command in a new terminal tab/window according to $launcher.
+  # $title is used as the tab/window title where supported.
+  sub launch_cmd {
+      my ($cmd, $cwd, $launcher, $title) = @_;
+      $title //= 'saisons';
+  
+      if ($launcher eq 'tmux') {
+          system('tmux', 'new-window', '-c', $cwd, $cmd);
+      }
+      elsif ($launcher eq 'screen') {
+          system('screen', '-X', 'screen', '-t', substr($title, 0, 20),
+                 'bash', '-c', "$cmd; exec bash");
+      }
+      elsif ($launcher eq 'gnome-terminal') {
+          system('gnome-terminal', '--tab', "--working-directory=$cwd",
+                 '--', 'bash', '--login', '-c', $cmd);
+      }
+      elsif ($launcher eq 'iterm') {
+          my $escaped = _applescript_quote($cmd);
+          my $script = qq{
+              tell application "iTerm2"
+                  tell current window
+                      create tab with default profile
+                      tell current session of current tab
+                          write text $escaped
+                      end tell
+                  end tell
+              end tell
+          };
+          system('osascript', '-e', $script);
+      }
+      elsif ($launcher eq 'terminal-app') {
+          my $escaped = _applescript_quote($cmd);
+          my $script = qq{
+              tell application "Terminal"
+                  do script $escaped
+                  activate
+              end tell
+          };
+          system('osascript', '-e', $script);
+      }
+      else {
+          system('bash', '-c', $cmd);
+      }
+  }
+  
+  sub _applescript_quote {
+      my ($str) = @_;
+      $str =~ s/\\/\\\\/g;
+      $str =~ s/"/\\"/g;
+      return qq{"$str"};
+  }
+  
+  1;
+APP_SAISONS_LAUNCHER
+
+$fatpacked{"App/Saisons/UI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'APP_SAISONS_UI';
+  package App::Saisons::UI;
+  use strict;
+  use warnings;
+  use utf8;
+  use POSIX qw();           # for Termios (raw terminal mode)
+  use Term::ANSIColor qw(colored color);
+  use JSON::PP ();
+  
+  # Where we persist the user's selection and view mode between runs
+  my $STATE_FILE = "$ENV{HOME}/.config/saisons/state.json";
+  
+  # ── Color helpers ─────────────────────────────────────────────────────────────
+  # Two kinds of helpers:
+  #
+  # _col_*()  — emit just the ANSI start code, no reset. Use inside a row that
+  #              ends with a single RESET. This way no mid-line \e[0m breaks an
+  #              outer highlight (e.g. reverse video or a background color).
+  #
+  # _str_*()  — wrap a string with start + reset. Use for standalone colored
+  #              strings outside of a row (headers, prompts, messages).
+  
+  use constant RESET => color('reset');
+  
+  sub _col_yellow  { color('yellow') }
+  sub _col_cyan    { color('cyan') }
+  sub _col_green   { color('green') }
+  sub _col_white   { color('white') }
+  sub _col_boldgrn { color('bold green') }
+  sub _col_sel     { color('black on_cyan') }
+  sub _col_active  { color('white on_blue') }
+  
+  sub _str_bold    { colored($_[0], 'bold') }
+  sub _str_dim     { colored($_[0], 'faint') }
+  sub _str_boldyel { colored($_[0], 'bold yellow') }
+  sub _str_boldcyn { colored($_[0], 'bold cyan') }
+  sub _str_boldgrn { colored($_[0], 'bold green') }
+  sub _str_boldred { colored($_[0], 'bold red') }
+  
+  sub new { bless {}, shift }
+  
+  # ── Persisted state ───────────────────────────────────────────────────────────
+  # Saves/restores which sessions are selected and whether grouped mode is on.
+  
+  sub _load_state {
+      open my $fh, '<', $STATE_FILE or return {};
+      my $json = do { local $/; <$fh> };
+      close $fh;
+      eval { JSON::PP::decode_json($json) } // {};
+  }
+  
+  sub _save_state {
+      my ($state) = @_;
+      (my $dir = $STATE_FILE) =~ s|/[^/]+$||;
+      mkdir $dir unless -d $dir;
+      open my $fh, '>', $STATE_FILE or return;
+      print $fh JSON::PP::encode_json($state);
+      close $fh;
+  }
+  
+  # ── Raw terminal mode ─────────────────────────────────────────────────────────
+  # We switch the terminal to raw mode so we can read individual keypresses
+  # without waiting for Enter. POSIX::Termios lets us do this portably.
+  # _init_term() saves the original settings so _restore_term() can put them back.
+  
+  my ($OLD_TERM, $ROWS, $COLS);
+  
+  sub _init_term {
+      binmode STDOUT, ':utf8';
+      STDOUT->autoflush(1);
+      ($ROWS, $COLS) = _term_size();
+      my $tty = \*STDIN;
+      $OLD_TERM = POSIX::Termios->new;
+      $OLD_TERM->getattr(fileno($tty));
+      my $raw = POSIX::Termios->new;
+      $raw->getattr(fileno($tty));
+      # Disable ECHO (don't print typed chars) and ICANON (don't wait for newline)
+      $raw->setlflag($raw->getlflag & ~(POSIX::ECHO | POSIX::ICANON));
+      $raw->setcc(POSIX::VMIN, 1);   # return after 1 byte
+      $raw->setcc(POSIX::VTIME, 0);  # no timeout
+      $raw->setattr(fileno($tty), POSIX::TCSANOW);
+  }
+  
+  sub _restore_term {
+      $OLD_TERM->setattr(fileno(\*STDIN), POSIX::TCSANOW) if $OLD_TERM;
+  }
+  
+  sub _term_size {
+      # Ask the terminal for its dimensions via stty
+      my $s = `stty size 2>/dev/null`;
+      return ($s =~ /^(\d+)\s+(\d+)/) ? ($1, $2) : (40, 120);
+  }
+  
+  # ── Keypress reader ───────────────────────────────────────────────────────────
+  # Reads a single keypress and returns a string name for it.
+  # Arrow keys and special keys send multi-byte escape sequences: ESC [ X
+  # We use select() with a 50ms timeout to distinguish a lone ESC keypress
+  # from the start of an escape sequence.
+  
+  sub _read_key {
+      my $c = '';
+      sysread STDIN, $c, 1;
+  
+      if ($c eq "\033") {
+          # Check if more bytes follow within 50ms (escape sequence vs lone ESC)
+          my $rin = '';
+          vec($rin, fileno(STDIN), 1) = 1;
+          return 'ESC' unless select($rin, undef, undef, 0.05);
+  
+          my $c2 = '';
+          sysread STDIN, $c2, 1;
+          if ($c2 eq '[') {
+              my $c3 = '';
+              sysread STDIN, $c3, 1;
+              return 'UP'    if $c3 eq 'A';
+              return 'DOWN'  if $c3 eq 'B';
+              return 'RIGHT' if $c3 eq 'C';
+              return 'LEFT'  if $c3 eq 'D';
+              if ($c3 =~ /[0-9]/) {
+                  # Extended sequences end with ~: e.g. ESC [ 5 ~  = Page Up
+                  my $c4 = ''; sysread STDIN, $c4, 1;
+                  return 'PGUP'   if $c3 eq '5';
+                  return 'PGDN'   if $c3 eq '6';
+                  return 'HOME'   if $c3 eq '1';
+                  return 'END'    if $c3 eq '4';
+                  return 'DELETE' if $c3 eq '3';
+                  return 'IGNORE';
+              }
+              return 'IGNORE';
+          }
+          return 'ESC';
+      }
+  
+      return $c;
+  }
+  
+  # ── Main interactive list ─────────────────────────────────────────────────────
+  # Shows a scrollable list of sessions. The user navigates with arrow keys,
+  # toggles selection with Enter, and opens sessions with 'o'.
+  # Returns a list of selected session hashrefs, or empty list if cancelled.
+  
+  sub interactive_select {
+      my ($self, $sessions, $running) = @_;
+      $running //= {};
+  
+      # Restore previous selection and view mode
+      my $state   = _load_state();
+      my %sel_ids = map { $_ => 1 } @{ $state->{selected} // [] };
+      my $grouped = $state->{grouped} // 0;  # 0 = flat (default)
+      my $cursor  = 0;
+      my $offset      = 0;   # index of the first visible row
+      my $filter      = '';  # metadata filter: title/path/date (fast, no file I/O)
+      my $fulltext    = '';  # full-text filter: searches message content (slower)
+  
+      my @sort_cols = qw(selected running agent date size session path title);
+      my $sort_idx  = 0;   # index into @sort_cols — starts on 'selected'
+      my $sort_rev  = 0;   # 0 = normal, 1 = reversed
+  
+      _init_term();
+      local $SIG{INT} = sub { _restore_term(); print "\033[?25h\033[0m\n"; STDOUT->flush(); exit 0 };
+      print "\033[?25l";  # hide blinking cursor
+  
+      my @result;
+  
+      while (1) {
+          ($ROWS, $COLS) = _term_size();
+  
+          # Apply filters — metadata filter is instant, fulltext scans files
+          my @filtered = grep { ref $_ eq 'HASH' } @$sessions;
+          if ($filter) {
+              my $re = eval { qr/\Q$filter\E/i } // qr/(?!)/;
+              @filtered = grep {
+                  $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re
+              } @filtered;
+          }
+          if ($fulltext) {
+              @filtered = grep { _search_content($_, $fulltext) } @filtered;
+          }
+          my $visible_sessions = \@filtered;
+  
+          my $sort_col = $sort_cols[$sort_idx];
+          my @entries = _build_entries($visible_sessions, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
+          my $n       = scalar @entries;
+          my $visible = $ROWS - 3 - 1;  # header + sep + footer + 1-line banner
+  
+          # Keep cursor and scroll offset within valid bounds
+          $cursor = 0      if $cursor < 0;
+          $cursor = $n - 1 if $cursor >= $n && $n;
+          # Skip over header rows — cursor must always land on a session row
+          $cursor++ while $cursor < $n - 1 && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
+          $cursor-- while $cursor > 0      && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
+          if ($n <= $visible) {
+              $offset = 0;
+          } else {
+              my $max = $n - $visible;
+              $offset = $max if $offset > $max;
+              $offset = $cursor              if $cursor < $offset;
+              $offset = $cursor - $visible + 1 if $cursor >= $offset + $visible;
+              $offset = 0 if $offset < 0;
+          }
+  
+          _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev);
+  
+          my $key = _read_key();
+  
+          if ($key eq 'UP' || $key eq 'k') {
+              $cursor--;
+              # Skip over group header rows — they are not selectable
+              $cursor-- while $cursor > 0 && $entries[$cursor]{type} eq 'header';
+          }
+          elsif ($key eq 'DOWN' || $key eq 'j') {
+              $cursor++;
+              $cursor++ while $cursor < $n-1 && $entries[$cursor]{type} eq 'header';
+          }
+          elsif ($key eq 'PGUP') { $cursor -= $visible; $offset -= $visible }
+          elsif ($key eq 'PGDN') { $cursor += $visible; $offset += $visible }
+          elsif ($key eq 'HOME' || $key eq 'g') { $cursor = 0; $offset = 0 }
+          elsif ($key eq 'END'  || $key eq 'G') { $cursor = $n - 1 }
+          elsif ($key eq ' ') {
+              # Toggle selection on the session under the cursor
+              my $e = $entries[$cursor];
+              if ($e && $e->{type} eq 'session') {
+                  my $id = $e->{session}{id};
+                  $sel_ids{$id} ? delete $sel_ids{$id} : ($sel_ids{$id} = 1);
+              }
+          }
+          elsif ($key eq "\n" || $key eq "\r") {
+              # Open selected sessions (or cursor session if none selected)
+              my @to_open = _selected_sessions(\%sel_ids, $sessions);
+              unless (@to_open) {
+                  my $e = $entries[$cursor];
+                  push @to_open, $e->{session} if $e && $e->{type} eq 'session';
+              }
+              if (@to_open) {
+                  my @already_running = grep { $running->{ $_->{id} } } @to_open;
+                  if (@already_running) {
+                      my $ans = _confirm(scalar(@already_running) . " session(s) already running. Open anyway? [y/N] ");
+                      next unless $ans =~ /^y/i;
+                  }
+                  _save_state({ selected => [map { $_->{id} } @to_open], grouped => $grouped });
+                  @result = @to_open;
+                  last;
+              }
+          }
+          elsif ($key eq 'a') {
+              # Select all sessions
+              $sel_ids{$_->{id}} = 1 for grep { $_->{type} eq 'session' } @entries;
+          }
+          elsif ($key eq 'A') {
+              # Deselect all
+              %sel_ids = ();
+          }
+          elsif ($key eq 's' || $key eq 'S') {
+              my $new_rev = $key eq 'S' ? 1 : 0;
+              my ($new_idx) = _sort_popup(\@sort_cols, $sort_idx, $new_rev);
+              if (defined $new_idx) {
+                  $sort_idx = $new_idx;
+                  $sort_rev = $new_rev;
+                  $cursor = 0; $offset = 0;
+              }
+          }
+          elsif ($key eq 't') {
+              # Toggle between flat (date order) and grouped (by directory) view
+              $grouped = !$grouped;
+              $cursor = 0; $offset = 0;
+          }
+          elsif ($key eq 'r') {
+              # Re-scan which sessions are currently running
+              my %seen;
+              %$running = ();
+              for my $s (@$sessions) {
+                  next if $seen{ref $s->{_adapter}}++;
+                  %$running = (%$running, $s->{_adapter}->running);
+              }
+          }
+          elsif ($key eq 'v') {
+              # View conversation history for the session under the cursor
+              my $e = $entries[$cursor];
+              if ($e && $e->{type} eq 'session') {
+                  _restore_term(); print "\033[?25h";
+                  _peek($e->{session});
+                  _init_term(); print "\033[?25l";
+              }
+          }
+          elsif ($key eq 'd' || $key eq 'DELETE') {
+              # Delete selected sessions, or the one under the cursor if none selected
+              my @to_del = _selected_sessions(\%sel_ids, $sessions);
+              unless (@to_del) {
+                  my $e = $entries[$cursor];
+                  push @to_del, $e->{session} if $e && $e->{type} eq 'session';
+              }
+              if (@to_del) {
+                  _do_delete(\@to_del, $sessions, \%sel_ids);
+                  $cursor = 0; $offset = 0;
+              }
+          }
+          elsif ($key eq 'm') {
+              # Move selected sessions to a different directory
+              my @to_move = _selected_sessions(\%sel_ids, $sessions);
+              if (@to_move) {
+                  _restore_term(); print "\033[?25h";
+                  _do_move(\@to_move, $sessions, \%sel_ids);
+                  $cursor = 0; $offset = 0;
+                  _init_term(); print "\033[?25l";
+              }
+          }
+          elsif ($key eq '/' || $key eq '?') {
+              # Incremental search — stay in raw mode, update list on every keystroke
+              my $is_fulltext = $key eq '?';
+              my $prompt      = $is_fulltext
+                  ? colored('?search: ', 'bold yellow')
+                  : colored('/filter: ', 'bold cyan');
+              my $query = $is_fulltext ? $fulltext : $filter;
+  
+              while (1) {
+                  # For metadata filter: update list live on every keystroke.
+                  # For full-text search: only show current results (applied on Enter).
+                  my @f2 = grep { ref $_ eq 'HASH' } @$sessions;
+                  if (!$is_fulltext && $query) {
+                      my $re = eval { qr/\Q$query\E/i } // qr/(?!)/;
+                      @f2 = grep { $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re } @f2;
+                  } elsif ($is_fulltext && $fulltext) {
+                      # Show previously applied fulltext results while typing new query
+                      my $re = eval { qr/\Q$fulltext\E/i } // qr/(?!)/;
+                      @f2 = grep { _search_content($_, $fulltext) } @f2;
+                  }
+                  ($ROWS, $COLS) = _term_size();
+                  my $sort_col = $sort_cols[$sort_idx];
+                  my @e2   = _build_entries(\@f2, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
+                  my $n2   = scalar @e2;
+                  my $vis2 = $ROWS - 3 - 1;
+                  my $cur2 = 0;
+                  $cur2++ while $cur2 < $n2 - 1 && $e2[$cur2] && $e2[$cur2]{type} eq 'header';
+                  _render(\@e2, $cur2, 0, $vis2, \%sel_ids, $grouped, $running,
+                      ($is_fulltext ? $filter : $query),
+                      ($is_fulltext ? $query  : $fulltext),
+                      $sort_col, $sort_rev);
+                  # Overwrite footer with search prompt + current query
+                  print "\033[${ROWS};1H\033[K";
+                  my $hint = $is_fulltext ? ' (ENTER=search ESC=cancel)' : ' (ENTER=apply ESC=cancel)';
+                  print $prompt . colored($query, 'bold white') . colored($hint, 'faint');
+                  STDOUT->flush();
+  
+                  my $ch = _read_key();
+                  if ($ch eq "\n" || $ch eq "\r") {
+                      # Apply query — for fulltext this triggers the file scan
+                      if ($is_fulltext) { $fulltext = $query } else { $filter = $query }
+                      $cursor = 0; $offset = 0;
+                      last;
+                  } elsif ($ch eq 'ESC') {
+                      last;  # cancel — don't apply
+                  } elsif ($ch eq 'BACKSPACE' || $ch eq "\x7f" || $ch eq "\x08") {
+                      $query = substr($query, 0, -1) if length($query);
+                  } elsif (length($ch) == 1 && $ch ge ' ') {
+                      $query .= $ch;
+                  }
+              }
+          }
+          elsif ($key eq 'ESC') {
+              if ($filter || $fulltext) {
+                  # ESC clears active filters
+                  $filter = ''; $fulltext = '';
+                  $cursor = 0; $offset = 0;
+              } else {
+                  _save_state({ selected => [keys %sel_ids], grouped => $grouped });
+                  last;
+              }
+          }
+          elsif ($key eq 'q') {
+              # Save current selection so it's restored next time
+              _save_state({ selected => [keys %sel_ids], grouped => $grouped });
+              last;
+          }
+      }
+  
+      _restore_term();
+      print "\033[?25h\033[2J\033[H\033[0m";  # show cursor, clear screen, reset all attributes
+      STDOUT->flush();
+      return @result;
+  }
+  
+  # Returns the session hashrefs for all currently selected session IDs
+  sub _selected_sessions {
+      my ($sel_ids, $sessions) = @_;
+      my %by_id = map { $_->{id} => $_ } @$sessions;
+      return map { $by_id{$_} } grep { $by_id{$_} } keys %$sel_ids;
+  }
+  
+  # ── Entry list builder ────────────────────────────────────────────────────────
+  # Converts the flat sessions array into a list of display entries.
+  # In grouped mode, inserts header entries before each directory's sessions.
+  # Each entry is either: { type => 'session', session => $hashref }
+  #                    or: { type => 'header',  label   => $dir_path }
+  
+  my %SORT_CMP = (
+      selected => sub { ($_[1]{_sel}  // 0) <=> ($_[0]{_sel}  // 0) },
+      running  => sub { ($_[1]{_run}  // 0) <=> ($_[0]{_run}  // 0) },
+      agent    => sub { _adapter_tag($_[0]{_adapter}, 1) cmp _adapter_tag($_[1]{_adapter}, 1) },
+      date     => sub { $_[0]{date}          cmp $_[1]{date}          },
+      size     => sub { ($_[0]{_size} // 0) <=> ($_[1]{_size} // 0)  },
+      session  => sub { $_[0]{id}            cmp $_[1]{id}            },
+      path     => sub { $_[0]{cwd}           cmp $_[1]{cwd}           },
+      title    => sub { lc($_[0]{title})     cmp lc($_[1]{title})     },
+  );
+  
+  sub _sorted {
+      my ($sessions, $sort_col, $sort_rev, $sel_ids, $running) = @_;
+      my $cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
+      # Annotate with sel/run flags for sorting, then strip after
+      my @ann = map { { %$_, _sel => $sel_ids->{$_->{id}} ? 1 : 0,
+                                _run => $running->{$_->{id}} ? 1 : 0 } } @$sessions;
+      my @sorted = sort { $cmp->($a, $b) } @ann;
+      # reverse when descending is requested
+      @sorted = reverse @sorted if $sort_rev;
+      return @sorted;
+  }
+  
+  sub _build_entries {
+      my ($sessions, $running, $sel_ids, $grouped, $sort_col, $sort_rev) = @_;
+      $sort_col //= 'date';
+  
+      my @valid = grep { ref $_ eq 'HASH' } @$sessions;
+  
+      if ($grouped) {
+          my %by_dir;
+          push @{ $by_dir{$_->{cwd}} }, $_ for @valid;
+  
+          # Sort sessions within each group, then sort groups by their first (top) session
+          my %sorted_dir;
+          for my $dir (keys %by_dir) {
+              $sorted_dir{$dir} = [ _sorted($by_dir{$dir}, $sort_col, $sort_rev, $sel_ids, $running) ];
+          }
+          my $dir_cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
+          my @dirs = sort {
+              my $ann_a = { %{$sorted_dir{$a}[0]}, _sel => $sel_ids->{$sorted_dir{$a}[0]{id}} ? 1 : 0,
+                                                    _run => $running->{$sorted_dir{$a}[0]{id}} ? 1 : 0 };
+              my $ann_b = { %{$sorted_dir{$b}[0]}, _sel => $sel_ids->{$sorted_dir{$b}[0]{id}} ? 1 : 0,
+                                                    _run => $running->{$sorted_dir{$b}[0]{id}} ? 1 : 0 };
+              $dir_cmp->($ann_a, $ann_b) || $a cmp $b
+          } keys %sorted_dir;
+          @dirs = reverse @dirs if $sort_rev;
+  
+          my @entries;
+          for my $dir (@dirs) {
+              push @entries, { type => 'header', label => $dir };
+              push @entries, map { { type => 'session', session => $_ } } @{ $sorted_dir{$dir} };
+          }
+          return @entries;
+      }
+  
+      return map { { type => 'session', session => $_ } }
+                 _sorted(\@valid, $sort_col, $sort_rev, $sel_ids, $running);
+  }
+  
+  # Truncates a path to fit in $width columns, adding '...' prefix if needed
+  sub _truncate_path {
+      my ($path, $width) = @_;
+      return sprintf "%-${width}s", length($path) > $width
+          ? '...' . substr($path, -($width - 3))
+          : $path;
+  }
+  
+  # ── Search ────────────────────────────────────────────────────────────────────
+  
+  # Returns true if the session's conversation content matches the query string.
+  # Uses grep for speed — no need to parse the full file in Perl.
+  sub _search_content {
+      my ($session, $query) = @_;
+  
+      # Always match on title and path (fast, no file I/O)
+      return 1 if index(lc($session->{title}), lc($query)) >= 0;
+      return 1 if index(lc($session->{cwd}),   lc($query)) >= 0;
+  
+      # Search the session file for the query string (case-insensitive)
+      my $file = $session->{_file} or return 0;
+      return 0 unless -f $file;
+      my $re = eval { qr/\Q$query\E/i } or return 0;
+      open my $fh, '<', $file or return 0;
+      while (<$fh>) {
+          if (/$re/) { close $fh; return 1 }
+      }
+      close $fh;
+      return 0;
+  }
+  
+  # ── Title banner ─────────────────────────────────────────────────────────────
+  
+  sub _banner {
+      my ($cols) = @_;
+  
+      # Fullwidth letters have broad terminal font support unlike math italic
+      my @letters = split //, "\x{FF33}\x{FF21}\x{FF29}\x{FF33}\x{FF2F}\x{FF2E}\x{FF33}";
+      my @colors  = ('bold red', 'bold yellow', 'bold green', 'bold cyan', 'bold blue', 'bold magenta', 'bold red');
+      my $title   = join '', map { colored($letters[$_], $colors[$_]) } 0..$#letters;
+  
+      my $author      = "v$App::Saisons::VERSION  by Nicolas Mendoza  \x{00a9} 2026";
+      my $title_vis   = scalar @letters * 2;  # fullwidth chars are 2 columns wide
+      my $pad         = $cols - $title_vis - length($author);
+      $pad = 2 if $pad < 2;
+  
+      my $art_str = $title . _str_dim(' ' x $pad . $author) . "\033[K\n";
+  
+      return $art_str;
+  }
+  
+  # ── Screen renderer ───────────────────────────────────────────────────────────
+  # Draws the full UI: header, session list, scrollbar, footer.
+  # Called on every keypress since the whole screen is redrawn each time.
+  
+  sub _render {
+      my ($entries, $cursor, $offset, $visible, $sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev) = @_;
+      $sort_col //= 'date';
+      my $sort_arrow = $sort_rev ? "\x{2193}" : "\x{2191}";  # ↓ or ↑
+  
+      my $n    = scalar @$entries;
+      my $cols = $COLS;
+  
+      # Title banner: 1 line (fullwidth letters + author right-aligned)
+      my $banner = _banner($cols);
+      my $banner_lines = 1;
+  
+      # Fixed column widths
+      my $rel_w    = 8;   # "2h ago" — always the same width
+      my $size_w   = 6;   # "1.2MB" — history file size
+      my $id_w     = 36;  # UUID — always 36 chars
+      my $tag_w    = 5;   # adapter tag: ✶ Cld / a Aid / ☁ Cdx
+      my $prefix_w = 2;   # sel_mark (*) + running_bullet (●)
+      my $sep_w    = 2;   # spaces between columns
+      my $has_sb   = $n > $visible ? 1 : 0;
+      my $usable   = $COLS - $has_sb;
+  
+      # Dynamic path width: measure actual content, cap at 40, min 20
+      # Hidden in grouped mode since the directory is shown as a header row
+      my $path_w = 0;
+      unless ($grouped) {
+          my $max_path = 0;
+          for my $e (@$entries) {
+              next unless $e->{type} eq 'session';
+              my $len = length($e->{session}{cwd});
+              $max_path = $len if $len > $max_path;
+          }
+          $path_w = $max_path > 40 ? 40 : $max_path < 20 ? 20 : $max_path;
+      }
+  
+      # Title fills whatever space remains
+      my $fixed   = $prefix_w + 1 + $tag_w + $sep_w + $rel_w + $sep_w + $size_w + $sep_w + $id_w + $sep_w
+                  + ($path_w ? $path_w + $sep_w : 0);
+      my $title_w = $usable - $fixed;
+      $title_w = 10 if $title_w < 10;
+  
+      # Build the entire frame as a single string to avoid flicker.
+      # We overwrite in place with \033[H (go to top) rather than clearing first.
+      my $frame = "\033[H";
+  
+      # Title banner
+      $frame .= $banner;
+  
+      # Precompute scrollbar chars (drawn via cursor positioning after rows)
+      my @sb_char;
+      if ($has_sb) {
+          my $bar_height = int($visible * $visible / $n) || 1;
+          my $bar_top    = int($offset  * $visible / $n);
+          for my $r (0 .. $visible - 1) {
+              $sb_char[$r] = ($r >= $bar_top && $r < $bar_top + $bar_height) ? '#' : '|';
+          }
+      }
+  
+      # Column header row — mark the active sort column with ↑/↓
+      my $hdr_col = sub {
+          my ($key, $label, $w) = @_;
+          my $l = $sort_col eq $key ? colored("$label$sort_arrow", 'bold yellow') : $label;
+          return sprintf "%-${w}s", $l;
+      };
+      my $sel_mark_hdr = $sort_col eq 'selected' ? colored('*',        'bold yellow') : '*';
+      my $run_mark_hdr = $sort_col eq 'running'  ? colored("\x{25cf}", 'bold yellow') : "\x{25cf}";
+      my $hdr = $grouped
+          ? sprintf("%s%s %s  %s  %s  %s  %s",
+              $sel_mark_hdr, $run_mark_hdr,
+              $hdr_col->('agent',   'Agt',     $tag_w),
+              $hdr_col->('date',    'When',    $rel_w),
+              $hdr_col->('size',    'Size',    $size_w),
+              $hdr_col->('session', 'Session', $id_w),
+              $hdr_col->('title',   'Title',   $title_w))
+          : sprintf("%s%s %s  %s  %s  %s  %s  %s",
+              $sel_mark_hdr, $run_mark_hdr,
+              $hdr_col->('agent',   'Agt',     $tag_w),
+              $hdr_col->('date',    'When',    $rel_w),
+              $hdr_col->('size',    'Size',    $size_w),
+              $hdr_col->('session', 'Session', $id_w),
+              $hdr_col->('path',    'Path',    $path_w),
+              $hdr_col->('title',   'Title',   $title_w));
+      $frame .= _str_bold($hdr) . "\n";
+      $frame .= _str_dim('-' x ($usable - 1)) . "\n";
+  
+      # Visible session rows
+      my $end = $offset + $visible - 1;
+      $end = $n - 1 if $end >= $n;
+  
+      for my $i ($offset .. $end) {
+          my $entry     = $entries->[$i];
+          my $active    = $i == $cursor;
+          my $row_idx   = $i - $offset;        # 0-based index within visible area
+          my $sb        = $sb_char[$row_idx] // '';  # scrollbar char for this row
+  
+          # Group header row — just a directory path label
+          if ($entry->{type} eq 'header') {
+              my $line = sprintf " %-*s", $usable - 2, $entry->{label};
+              $frame .= ($active
+                  ? color('reverse') . _str_boldyel($line) . RESET
+                  : _str_boldyel($line)) . "\n";
+              next;
+          }
+  
+          my $session    = $entry->{session};
+          my $is_sel     = $sel_ids->{ $session->{id} };
+          my $is_running = $running->{  $session->{id} };
+  
+          my $sel_mark       = $is_sel     ? '*'        : ' ';
+          my $running_bullet = $is_running ? "\x{25cf}" : ' ';
+  
+          # Field values padded to their column width
+          my $tag   = _adapter_tag($session->{_adapter}, $active || $is_sel);
+          my $when  = sprintf "%-${rel_w}s",   _rel_time($session->{epoch});
+          my $size  = sprintf "%-${size_w}s",  _fmt_size($session->{_size} // 0);
+          my $id    = sprintf "%-${id_w}s",    $session->{id};
+          my $raw_title = substr($session->{title}, 0, $title_w);
+          my $raw_path  = $grouped ? '' : _truncate_path($session->{cwd}, $path_w);
+  
+          # Highlight matching substrings in title and path (not ID) when filtering
+          if ($filter && !$active) {
+              my $re = eval { qr/(\Q$filter\E)/i } // qr/(?!)/;
+              $raw_title =~ s/$re/colored($1, 'bold reverse')/ge;
+              $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $grouped;
+          }
+  
+          my $title    = sprintf "%-${title_w}s", $raw_title;
+          my $path_sep = $grouped ? '' : $raw_path . '  ';
+  
+          my $row;
+          if ($active) {
+              $row = _col_active . $sel_mark
+                   . ($is_running ? _col_boldgrn . $running_bullet . _col_active : ' ')
+                   . " $tag  $when  $size  $id  $path_sep$title"
+                   . RESET;
+          } elsif ($is_sel) {
+              $row = _col_sel . $sel_mark
+                   . ($is_running ? _col_boldgrn . $running_bullet . _col_sel : ' ')
+                   . " $tag  $when  $size  $id  $path_sep$title"
+                   . RESET;
+          } else {
+              my $path_part = $grouped ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . '  ';
+              $row = $sel_mark
+                   . ($is_running ? _col_boldgrn . $running_bullet : ' ')
+                   . ' ' . $tag . RESET . '  '
+                   . _col_yellow . $when . '  '
+                   . _col_cyan   . $size . '  '
+                   . _col_cyan   . $id   . '  '
+                   . $path_part
+                   . _col_white  . $title
+                   . RESET;
+          }
+  
+          $frame .= $row . "\n";
+      }
+  
+      # Pad with blank lines up to the visible area height so old content is overwritten.
+      # Each padding line gets \033[K to erase any leftover characters.
+      my $rows_drawn = ($end >= $offset) ? ($end - $offset + 1) : 0;
+      $frame .= "\033[K\n" x ($visible - $rows_drawn) if $rows_drawn < $visible;
+  
+      # Draw scrollbar via absolute cursor positioning (avoids ANSI-width miscalculation)
+      # Rows start at line: banner(1) + header(1) + sep(1) = line 4
+      if ($has_sb) {
+          my $sb_col = $COLS;  # rightmost column
+          for my $r (0 .. $visible - 1) {
+              my $screen_row = $banner_lines + 2 + 1 + $r;  # 1-based
+              $frame .= "\033[${screen_row};${sb_col}H"
+                     . _str_dim($sb_char[$r] // '|');
+          }
+      }
+  
+      # Footer on the last line — no cursor jump needed, we've written exactly
+      # banner(3) + header(1) + sep(1) + visible rows = $ROWS - 1 lines above it.
+      my $nsel        = scalar keys %$sel_ids;
+      my $toggle_mode = $grouped ? 'flat' : 'grouped';  # what [t] will switch TO
+      my $pct         = $n > $visible ? sprintf(' %d%%', int(($offset + $visible/2) / $n * 100)) : '';
+      my $footer = sprintf(
+          '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] →%s  [s]ort:%s  [r]efresh  [/] filter  [?] search  [a/A]  [q]uit   %d sel/%d%s%s',
+          $toggle_mode, $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct,
+          ($filter   ? colored("  /filter: $filter",     'bold cyan')   : '')
+        . ($fulltext ? colored("  ?search: $fulltext",   'bold yellow') : ''));
+      $frame .= colored(substr($footer . ' ' x $cols, 0, $cols - 1), 'white on_blue');
+  
+      # Single write — eliminates flicker from partial screen updates
+      print $frame;
+      STDOUT->flush();
+  }
+  
+  # ── Sort popup ───────────────────────────────────────────────────────────────
+  # Shows a small centered popup to pick a sort column.
+  # Returns the chosen index into @sort_cols, or undef if cancelled.
+  
+  sub _sort_popup {
+      my ($sort_cols, $current_idx, $reverse) = @_;
+  
+      my @labels = (
+          'selected  (*)',
+          'running   (●)',
+          'agent',
+          'date',
+          'size',
+          'session',
+          'path',
+          'title',
+      );
+  
+      my $pick   = $current_idx;
+      my $dir    = $reverse ? "\x{2193} descending" : "\x{2191} ascending";
+      my $footer_text = ' [↑↓] move  [ENTER] ok  [ESC] cancel ';
+      my $title_text  = " Sort $dir ";
+  
+      # Width fits the widest of: title, footer, labels (with 2-char padding)
+      my $max_label = (sort { $b <=> $a } map { length } @labels)[0];
+      my $w = (sort { $b <=> $a } length($title_text), length($footer_text), $max_label + 4)[0];
+  
+      while (1) {
+          ($ROWS, $COLS) = _term_size();
+  
+          my $h    = scalar(@labels) + 4;
+          my $top  = int(($ROWS - $h) / 2);
+          my $left = int(($COLS - $w) / 2);
+  
+          my $popup = '';
+          my $pad   = int(($w - length($title_text)) / 2);
+          $popup .= "\033[${top};${left}H" . colored(' ' x $w, 'white on_blue');
+          $popup .= "\033[" . ($top+1) . ";${left}H"
+                 . colored(' ' x $pad . $title_text . ' ' x ($w - $pad - length($title_text)), 'bold white on_blue');
+          $popup .= "\033[" . ($top+2) . ";${left}H" . colored(' ' x $w, 'white on_blue');
+  
+          for my $i (0 .. $#labels) {
+              my $row   = $top + 3 + $i;
+              my $label = sprintf " %-*s ", $w - 2, $labels[$i];
+              $popup .= "\033[${row};${left}H";
+              $popup .= $i == $pick
+                  ? colored($label, 'black on_cyan')
+                  : colored($label, 'white on_blue');
+          }
+  
+          my $footer_row = $top + 3 + scalar @labels;
+          my $footer = sprintf "%-*s", $w, $footer_text;
+          $popup .= "\033[${footer_row};${left}H" . colored($footer, 'faint on_blue');
+  
+          print $popup;
+          STDOUT->flush();
+  
+          my $key = _read_key();
+          if    ($key eq 'UP'   || $key eq 'k') { $pick = ($pick - 1 + @labels) % @labels }
+          elsif ($key eq 'DOWN' || $key eq 'j') { $pick = ($pick + 1)           % @labels }
+          elsif ($key eq "\n"   || $key eq "\r") { return $pick }
+          elsif ($key eq 'ESC'  || $key eq 'q')  { return undef }
+      }
+  }
+  
+  sub _confirm {
+      my ($prompt) = @_;
+      print "\033[2J\033[H$prompt";
+      my $ans = '';
+      sysread STDIN, $ans, 1;
+      return $ans;
+  }
+  
+  # ── Peek / conversation view ──────────────────────────────────────────────────
+  # Shows the full conversation history for a session in a scrollable view.
+  # Messages are word-wrapped to fit the terminal width.
+  
+  sub _peek {
+      my ($session) = @_;
+      my @msgs = $session->{_adapter}->load_messages($session);
+      my ($rows, $cols) = _term_size();
+      my $wrap = $cols - 9;  # leave room for the "  You: " / "   AI: " prefix
+      $wrap = 40 if $wrap < 40;
+  
+      # Build the list of display lines up front (pre-wrapped)
+      my @lines;
+      push @lines, { text => _str_bold('Session: ') . $session->{title} };
+      push @lines, { text => _str_bold('Path:    ') . _str_boldgrn($session->{cwd}) };
+      push @lines, { text => _str_bold('ID:      ') . _str_boldcyn($session->{id}) };
+      push @lines, { text => _str_dim('-' x ($cols - 2)) };
+  
+      for my $msg (@msgs) {
+          my $is_user = $msg->{role} eq 'user';
+          my $prefix  = $is_user ? _str_boldcyn('  You: ') : _str_boldyel('   AI: ');
+          my $indent  = ' ' x 7;  # align continuation lines with text after prefix
+          my $first   = 1;
+  
+          (my $text = $msg->{text}) =~ s/\r//g;
+          for my $line (split /\n/, $text) {
+              $line ||= ' ';
+  
+              # Word-wrap long lines
+              while (length($line) > $wrap) {
+                  my $chunk = substr($line, 0, $wrap);
+                  $chunk =~ s/\s+\S+$// or substr($line, 0, $wrap) = '';
+                  substr($line, 0, length($chunk) + ($chunk ne substr($line,0,length($chunk)) ? 1 : 0)) = '';
+                  push @lines, { text => ($first ? $prefix : $indent) . $chunk };
+                  $first = 0;
+              }
+              push @lines, { text => ($first ? $prefix : $indent) . $line };
+              $first = 0;
+          }
+          push @lines, { text => '' };  # blank line between messages
+      }
+  
+      my $n      = scalar @lines;
+      my $vis    = $rows - 2;
+      my $offset = $n > $vis ? $n - $vis : 0;  # start scrolled to the bottom
+  
+      _init_term();
+      print "\033[?25l";
+  
+      while (1) {
+          ($rows, $cols) = _term_size();
+          $vis = $rows - 2;
+          $offset = 0          if $offset < 0;
+          $offset = $n - $vis  if $n > $vis && $offset > $n - $vis;
+  
+          print "\033[H\033[J";
+          my $end = $offset + $vis - 1;
+          $end = $n - 1 if $end >= $n;
+          print $lines[$_]{text} . "\n" for $offset .. $end;
+  
+          # Scrollbar
+          if ($n > $vis) {
+              my $bar_h   = int($vis * $vis / $n) || 1;
+              my $bar_top = int($offset * $vis / $n);
+              for my $r (0 .. $vis - 1) {
+                  my $ch = ($r >= $bar_top && $r < $bar_top + $bar_h) ? '█' : '│';
+                  print "\033[" . ($r + 1) . ";${cols}H$ch";
+              }
+          }
+  
+          print "\033[${rows};1H";
+          print colored(
+              substr('[↑↓/jk] scroll  [PgUp/Dn] page  [g/G] top/bot  [q/ESC] return' . ' ' x $cols, 0, $cols - 1),
+              'white on_blue');
+  
+          my $key = _read_key();
+          if    ($key eq 'UP'   || $key eq 'k') { $offset-- }
+          elsif ($key eq 'DOWN' || $key eq 'j') { $offset++ }
+          elsif ($key eq 'PGUP')                { $offset -= $vis }
+          elsif ($key eq 'PGDN')                { $offset += $vis }
+          elsif ($key eq 'HOME' || $key eq 'g') { $offset = 0 }
+          elsif ($key eq 'END'  || $key eq 'G') { $offset = $n - $vis }
+          elsif ($key eq 'q' || $key eq 'ESC')  { last }
+      }
+  
+      _restore_term();
+      print "\033[?25h";
+  }
+  
+  # ── Delete and move ───────────────────────────────────────────────────────────
+  
+  sub _do_delete {
+      my ($chosen, $sessions, $sel_ids) = @_;
+      print "\033[2J\033[H";
+      print _str_boldred('Delete ' . scalar(@$chosen) . " session(s)?\n\n");
+      for my $s (@$chosen) {
+          printf "  %s\n",  _str_bold($s->{title});
+          printf "  %s  %s\n", _str_boldgrn($s->{cwd}), _str_dim($s->{date});
+          printf "  %s\n",  _str_dim($s->{_file} // '');
+          print "\n";
+      }
+      print _str_boldred('[y] Delete  [n] Cancel: ');
+  
+      # Read a single keypress — stay in raw mode
+      my $ans = '';
+      sysread STDIN, $ans, 1;
+      print "\n";
+  
+      if (lc($ans) eq 'y') {
+          my %deleted_ids;
+          for my $session (@$chosen) {
+              $session->{_adapter}->delete_session($session);
+              delete $sel_ids->{ $session->{id} };
+              $deleted_ids{ $session->{id} } = 1;
+          }
+          @$sessions = grep { !$deleted_ids{$_->{id}} } @$sessions;
+      }
+  }
+  
+  sub _do_move {
+      my ($chosen, $sessions, $sel_ids) = @_;
+      print "\033[2J\033[H";
+      print "Move " . scalar(@$chosen) . " session(s)\n";
+      print "Current: " . _str_boldgrn($chosen->[0]{cwd}) . "\n\nNew directory: ";
+      _restore_term();
+      my $new_cwd = <STDIN>;
+      return unless defined $new_cwd;
+      chomp $new_cwd;
+      $new_cwd =~ s|/$||;  # strip trailing slash
+      unless ($new_cwd && -d $new_cwd) {
+          print _str_boldred("Directory does not exist: $new_cwd\n");
+          print "Press Enter..."; <STDIN>;
+          return;
+      }
+      for my $session (@$chosen) {
+          my ($ok, $err) = $session->{_adapter}->move_session($session, $new_cwd);
+          print $ok ? _str_boldgrn("Moved $session->{id}\n") : _str_boldred("Error: $err\n");
+      }
+      print "Press Enter..."; <STDIN>;
+  }
+  
+  # ── Utilities ─────────────────────────────────────────────────────────────────
+  
+  sub _adapter_tag {
+      my ($adapter, $active_or_sel) = @_;
+      my $label = $adapter->can('tag')       ? $adapter->tag       : substr(ref($adapter) =~ s/.*:://r, 0, 5);
+      my $col   = $adapter->can('tag_color') ? $adapter->tag_color : undef;
+      return ($col && !$active_or_sel) ? colored($label, $col) : $label;
+  }
+  
+  # Returns a human-readable relative time string, e.g. "2h ago", "3d ago"
+  sub _fmt_size {
+      my ($bytes) = @_;
+      return '0B'                          unless $bytes;
+      return "${bytes}B"                   if $bytes < 1024;
+      return sprintf('%.0fK', $bytes/1024) if $bytes < 1024*1024;
+      return sprintf('%.1fM', $bytes/1024/1024);
+  }
+  
+  sub _rel_time {
+      my ($epoch) = @_;
+      return 'unknown' unless $epoch;
+      my $diff = time() - $epoch;
+      return 'just now'                    if $diff < 60;
+      return int($diff/60)       . 'm ago' if $diff < 3600;
+      return int($diff/3600)     . 'h ago' if $diff < 86400;
+      return int($diff/86400)    . 'd ago' if $diff < 86400 * 30;
+      return int($diff/86400/30) . 'mo ago' if $diff < 86400 * 365;
+      return int($diff/86400/365). 'y ago';
+  }
+  
+  1;
+APP_SAISONS_UI
+
 $fatpacked{"Devel/InnerPackage.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'DEVEL_INNERPACKAGE';
   package Devel::InnerPackage;
   
@@ -1083,1963 +3040,6 @@ $fatpacked{"Module/Pluggable/Object.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."
   
 MODULE_PLUGGABLE_OBJECT
 
-$fatpacked{"Saisons.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS';
-  package Saisons;
-  use strict;
-  use warnings;
-  
-  our $VERSION = '0.1.0';
-  
-  1;
-SAISONS
-
-$fatpacked{"Saisons/Adapter/Aider.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_ADAPTER_AIDER';
-  package Saisons::Adapter::Aider;
-  use strict;
-  use warnings;
-  use POSIX qw();
-  use Saisons::Launcher ();
-  
-  # Aider stores chat history in .aider.chat.history.md files, one per directory.
-  # Each file contains multiple sessions separated by:
-  #   # aider chat started at YYYY-MM-DD HH:MM:SS
-  #
-  # Since Aider has no UUID-based session IDs, we synthesize one from the
-  # directory path + session start timestamp.
-  
-  sub new { bless {}, shift }
-  
-  sub name      { 'Aider' }
-  sub tag       { "a Aid" }
-  sub tag_color { 'bold green' }
-  
-  sub find_sessions {
-      my ($self) = @_;
-  
-      my @search_dirs;
-      if (my $env = $ENV{SAISONS_SEARCH_DIRS}) {
-          @search_dirs = split /:/, $env;
-      }
-      else {
-          my $home = $ENV{HOME};
-          @search_dirs = grep { -d $_ }
-              map { "$home/$_" } qw(projects dev src work code),
-              '/projects';
-      }
-      my @history_files = _find_history_files(\@search_dirs, 1);
-  
-      # Also check $HOME directly — aider run from home produces ~/.aider.chat.history.md
-      my $home_file = "$ENV{HOME}/.aider.chat.history.md";
-      push @history_files, $home_file if -f $home_file;
-  
-      my @sessions;
-      for my $file (@history_files) {
-          (my $cwd = $file) =~ s|/\.aider\.chat\.history\.md$||;
-          push @sessions, _parse_history_file($file, $cwd, $self);
-      }
-  
-      return @sessions;
-  }
-  
-  sub _find_history_files {
-      my ($roots, $maxdepth) = @_;
-      my @result;
-      my @queue = map { [$_, 0] } @$roots;
-      while (my $item = shift @queue) {
-          my ($dir, $depth) = @$item;
-          opendir my $dh, $dir or next;
-          for my $entry (readdir $dh) {
-              next if $entry eq '.' || $entry eq '..';
-              my $path = "$dir/$entry";
-              if (-f $path && $entry eq '.aider.chat.history.md') {
-                  push @result, $path;
-              }
-              elsif (-d $path && !-l $path && $depth < $maxdepth) {
-                  push @queue, [$path, $depth + 1];
-              }
-          }
-          closedir $dh;
-      }
-      return @result;
-  }
-  
-  sub running {
-      # Aider doesn't maintain a running-sessions registry like Claude does
-      return ();
-  }
-  
-  sub launch {
-      my ($self, $sessions, $launcher) = @_;
-  
-      # Group by cwd — open one aider session per unique directory
-      my %by_cwd;
-      push @{ $by_cwd{$_->{cwd}} }, $_ for @$sessions;
-  
-      for my $cwd (keys %by_cwd) {
-          # --restore-chat-history replays the previous conversation into context
-          my $cmd = "cd \Q$cwd\E && aider --restore-chat-history";
-          Saisons::Launcher::launch_cmd($cmd, $cwd, $launcher, 'aider');
-      }
-  }
-  
-  sub delete_session {
-      my ($self, $session) = @_;
-      # Aider sessions can't be individually deleted without rewriting the file.
-      # We rewrite the file excluding this session's block.
-      my $file = $session->{_file};
-      open my $fh, '<', $file or return 0;
-      my $content = do { local $/; <$fh> };
-      close $fh;
-  
-      # Remove the session block — from its header line up to (but not including)
-      # the next session header, or end of file
-      my $header = quotemeta($session->{_header});
-      $content =~ s/^$header\n.*?(?=^# aider chat started at |\z)//ms;
-  
-      open $fh, '>', $file or return 0;
-      print $fh $content;
-      close $fh;
-      return 1;
-  }
-  
-  sub load_messages {
-      my ($self, $session) = @_;
-      my @messages;
-      my $in_session = 0;
-  
-      open my $fh, '<', $session->{_file} or return @messages;
-      while (my $line = <$fh>) {
-          chomp $line;
-  
-          # Detect start of our session
-          if ($line eq $session->{_header}) {
-              $in_session = 1;
-              next;
-          }
-  
-          # Detect start of next session — stop
-          last if $in_session && $line =~ /^# aider chat started at /;
-  
-          next unless $in_session;
-  
-          # User messages start with ####
-          if ($line =~ /^#### (.+)$/) {
-              push @messages, { role => 'user', text => $1 };
-          }
-          # Assistant responses are plain text lines (not starting with > or #)
-          elsif ($line =~ /^[^>#\s]/ && @messages && $messages[-1]{role} eq 'user') {
-              push @messages, { role => 'assistant', text => $line };
-          }
-          elsif (@messages && $messages[-1]{role} eq 'assistant' && $line !~ /^>/) {
-              $messages[-1]{text} .= "\n$line";
-          }
-      }
-      close $fh;
-  
-      # Clean up trailing whitespace from assistant messages
-      for my $m (@messages) {
-          $m->{text} =~ s/\s+$//;
-      }
-  
-      return @messages;
-  }
-  
-  # ── private helpers ───────────────────────────────────────────────────────────
-  
-  sub _parse_history_file {
-      my ($file, $cwd, $adapter) = @_;
-      my @sessions;
-  
-      open my $fh, '<', $file or return @sessions;
-  
-      my ($header, $date, $epoch, $title, @lines);
-  
-      while (my $line = <$fh>) {
-          chomp $line;
-  
-          if ($line =~ /^# aider chat started at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$/) {
-              # Save previous session if any
-              if ($header) {
-                  push @sessions, _make_session($header, $date, $epoch, $cwd, $file, \@lines, $adapter);
-              }
-              $date   = $1;
-              $header = $line;
-              $epoch  = _parse_epoch($date);
-              @lines  = ();
-              $title  = undef;
-              next;
-          }
-  
-          next unless $header;
-          push @lines, $line;
-  
-          # First user message becomes the title
-          if (!$title && $line =~ /^#### (.+)$/) {
-              $title = $1;
-          }
-      }
-      close $fh;
-  
-      # Save last session
-      push @sessions, _make_session($header, $date, $epoch, $cwd, $file, \@lines, $adapter)
-          if $header;
-  
-      return @sessions;
-  }
-  
-  sub _make_session {
-      my ($header, $date, $epoch, $cwd, $file, $lines, $adapter) = @_;
-  
-      # Synthesize a stable UUID-like ID from directory path + timestamp.
-      # We encode the cwd as a hex string in the first 3 segments and the
-      # epoch seconds in the last 2, giving a unique ID per session.
-      my $cwd_sum = 0;
-      $cwd_sum = ($cwd_sum * 31 + ord($_)) & 0xFFFFFFFF for split //, $cwd;
-      my $id = sprintf('%08x-%04x-%04x-%04x-%012x',
-          $cwd_sum,
-          ($cwd_sum >> 16) & 0xFFFF,
-          ($epoch >> 16)   & 0xFFFF,
-          $epoch           & 0xFFFF,
-          $epoch);
-  
-      # First user message as title, fallback to date
-      my ($title) = grep { /^#### / } @$lines;
-      $title = $title ? $title =~ s/^#### //r : "(no messages)";
-  
-      # Approximate size: number of lines in this session's block
-      my $size = length(join "\n", @$lines);
-  
-      return {
-          id       => $id,
-          title    => $title,
-          date     => $date,
-          epoch    => $epoch,
-          cwd      => $cwd,
-          project  => $cwd,
-          _file    => $file,
-          _header  => $header,
-          _size    => $size,
-          _adapter => $adapter,
-      };
-  }
-  
-  sub _parse_epoch {
-      my ($date) = @_;  # "YYYY-MM-DD HH:MM:SS"
-      return 0 unless $date =~ /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
-      return POSIX::mktime($6, $5, $4, $3, $2-1, $1-1900);
-  }
-  
-  1;
-SAISONS_ADAPTER_AIDER
-
-$fatpacked{"Saisons/Adapter/Claude.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_ADAPTER_CLAUDE';
-  package Saisons::Adapter::Claude;
-  use strict;
-  use warnings;
-  use JSON::PP;
-  use POSIX qw();
-  use Saisons::Launcher ();
-  
-  # An adapter must implement:
-  #   name()          -> display name string
-  #   find_sessions() -> list of session hashrefs
-  #   running()       -> hashref { session_id => 1 }
-  #   launch($sessions_aref, $launcher) -> opens sessions
-  #   delete_session($session) -> removes session file
-  #   load_messages($session) -> list of { role, text }
-  
-  sub new { bless {}, shift }
-  
-  sub name      { 'Claude Code' }
-  sub tag       { "\x{2736} Cld" }
-  sub tag_color { 'bold red' }
-  
-  sub find_sessions {
-      my ($self) = @_;
-      my $projects_dir = "$ENV{HOME}/.claude/projects";
-  
-      # Build a lookup of session ID -> name from running session files.
-      # Used as fallback title for sessions that haven't ended yet (no aiTitle).
-      my %running_names;
-      my $sessions_dir = "$ENV{HOME}/.claude/sessions";
-      if (opendir my $sdh, $sessions_dir) {
-          while (my $f = readdir $sdh) {
-              next unless $f =~ /^\d+\.json$/;
-              open my $fh, '<', "$sessions_dir/$f" or next;
-              my $json = do { local $/; <$fh> };
-              close $fh;
-              my $obj = eval { decode_json($json) } or next;
-              next unless $obj->{sessionId} && $obj->{name};
-              $running_names{ $obj->{sessionId} } = $obj->{name};
-          }
-          closedir $sdh;
-      }
-  
-      my @sessions;
-  
-      opendir my $dh, $projects_dir or return @sessions;
-      for my $project (sort readdir $dh) {
-          next if $project =~ /^\./;
-          my $dir = "$projects_dir/$project";
-          next unless -d $dir;
-          opendir my $pdh, $dir or next;
-          for my $file (sort readdir $pdh) {
-              next unless $file =~ /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
-              my $id = $1;
-              my ($title, $date, $epoch, $cwd, $first_msg) = _extract_meta("$dir/$file");
-              $cwd //= _derive_path($project);
-              # title priority: aiTitle → running session name → first user message → default
-              $title //= $running_names{$id} // $first_msg // '(no title)';
-              my $size = -s "$dir/$file" // 0;
-              push @sessions, {
-                  id       => $id,
-                  project  => $project,
-                  cwd      => $cwd,
-                  title    => $title,
-                  date     => $date,
-                  epoch    => $epoch,
-                  _file    => "$dir/$file",
-                  _size    => $size,
-                  _adapter => $self,
-              };
-          }
-          closedir $pdh;
-      }
-      closedir $dh;
-      return @sessions;
-  }
-  
-  sub running {
-      my ($self) = @_;
-      my %running;
-      my $sessions_dir = "$ENV{HOME}/.claude/sessions";
-      opendir my $sdh, $sessions_dir or return %running;
-      while (my $f = readdir $sdh) {
-          next unless $f =~ /^\d+\.json$/;
-          open my $fh, '<', "$sessions_dir/$f" or next;
-          my $json = do { local $/; <$fh> };
-          close $fh;
-          my $obj = eval { decode_json($json) } or next;
-          my $pid = $obj->{pid}       or next;
-          my $sid = $obj->{sessionId} or next;
-          next unless kill(0, $pid);
-          $running{$sid} = 1;
-      }
-      closedir $sdh;
-      return %running;
-  }
-  
-  sub launch {
-      my ($self, $sessions, $launcher) = @_;
-      for my $s (@$sessions) {
-          my $cmd = "cd \Q$s->{cwd}\E && claude --resume \Q$s->{id}\E";
-          Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
-      }
-  }
-  
-  sub delete_session {
-      my ($self, $session) = @_;
-      return unlink $session->{_file};
-  }
-  
-  sub move_session {
-      my ($self, $session, $new_cwd) = @_;
-      my $projects_dir = "$ENV{HOME}/.claude/projects";
-      my $old_cwd      = $session->{cwd};
-      my $old_file     = $session->{_file};
-  
-      # Encode new cwd as project dir name (/ -> -)
-      (my $new_project = $new_cwd) =~ s|/|-|g;
-      $new_project =~ s/^-//;  # strip leading -
-      $new_project = "-$new_project";
-  
-      my $new_dir  = "$projects_dir/$new_project";
-      my $new_file = "$new_dir/$session->{id}.jsonl";
-  
-      # Create target project dir if needed
-      unless (-d $new_dir) {
-          mkdir $new_dir or return (0, "Cannot create $new_dir: $!");
-      }
-  
-      # Rewrite cwd in every line of the jsonl and write to new location
-      open my $in,  '<', $old_file or return (0, "Cannot read $old_file: $!");
-      open my $out, '>', $new_file or return (0, "Cannot write $new_file: $!");
-      my $old_quoted = quotemeta($old_cwd);
-      while (my $line = <$in>) {
-          $line =~ s/"cwd":"$old_quoted"/"cwd":"$new_cwd"/g;
-          print $out $line;
-      }
-      close $in;
-      close $out;
-  
-      # Remove old file; remove old project dir if now empty
-      unlink $old_file;
-      my $old_dir = "$projects_dir/$session->{project}";
-      opendir my $dh, $old_dir or return (1, '');
-      my @remaining = grep { !/^\./ } readdir $dh;
-      closedir $dh;
-      rmdir $old_dir unless @remaining;
-  
-      # Update session record in place
-      $session->{cwd}     = $new_cwd;
-      $session->{project} = $new_project;
-      $session->{_file}   = $new_file;
-  
-      return (1, '');
-  }
-  
-  sub load_messages {
-      my ($self, $session) = @_;
-      my @messages;
-      open my $fh, '<', $session->{_file} or return @messages;
-      while (<$fh>) {
-          next unless /"role":"(user|assistant)"/;
-          my $role = $1;
-          my $obj  = eval { decode_json($_) } or next;
-          my $content = $obj->{message}{content} // next;
-          my $text = '';
-          if (!ref $content) {
-              $text = $content;
-          }
-          elsif (ref $content eq 'ARRAY') {
-              for my $block (@$content) {
-                  next unless ref $block eq 'HASH' && ($block->{type} // '') eq 'text';
-                  $text .= $block->{text};
-              }
-          }
-          next unless length $text;
-          push @messages, { role => $role, text => $text };
-      }
-      close $fh;
-      return @messages;
-  }
-  
-  # ── private helpers ───────────────────────────────────────────────────────────
-  
-  sub _extract_meta {
-      my ($file) = @_;
-      my ($title, $date, $epoch, $cwd, $first_msg) = (undef, '0000-00-00', 0, undef, undef);
-      print STDERR "\033[2KLoading $file ...\r";
-      open my $fh, '<', $file or return ($title, $date, $epoch, $cwd);
-      while (<$fh>) {
-          $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
-          $cwd   = $1 if !$cwd && /"cwd":"([^"]+)"/;
-          # Capture first real user message as fallback title.
-          # Skip the context-continuation boilerplate Claude injects when a session
-          # hits the context limit.
-          if (!$first_msg && /"role":"user"/) {
-              my $obj = eval { decode_json($_) } or next;
-              my $c   = $obj->{message}{content};
-              my $txt = ref $c eq 'ARRAY' ? ($c->[0]{text} // '') : ($c // '');
-              next if $txt =~ /^This session is being continued from a previous conversation/;
-              ($first_msg) = split /\n/, $txt if length $txt;
-          }
-          if (/"timestamp":"(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
-              my $ts = "$1T$2:$3:$4";
-              if ($ts gt $date) {
-                  $date  = $ts;
-                  $epoch = POSIX::mktime($4, $3, $2,
-                      substr($1,8,2), substr($1,5,2)-1, substr($1,0,4)-1900);
-              }
-          }
-      }
-      close $fh;
-      print STDERR "\033[2K\r";
-      return ($title, $date, $epoch, $cwd, $first_msg);
-  }
-  
-  sub _derive_path {
-      my ($project) = @_;
-      (my $path = $project) =~ s/^-/\//;
-      $path =~ s/-/\//g;
-      return $path;
-  }
-  
-  1;
-SAISONS_ADAPTER_CLAUDE
-
-$fatpacked{"Saisons/Adapter/Codex.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_ADAPTER_CODEX';
-  package Saisons::Adapter::Codex;
-  use strict;
-  use warnings;
-  use JSON::PP ();
-  use POSIX qw();
-  use Saisons::Launcher ();
-  
-  # Codex CLI stores sessions under ~/.codex/sessions/YYYY/MM/DD/
-  # Each file is named: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
-  # First line is a SessionMeta JSON object with id, cwd, etc.
-  # Subsequent lines are ResponseItem / EventMsg objects with conversation turns.
-  # Resume with: codex resume <path>
-  
-  sub new { bless {}, shift }
-  
-  sub name      { 'Codex' }
-  sub tag       { "\x{2601} Cdx" }
-  sub tag_color { 'bold cyan' }
-  
-  sub find_sessions {
-      my ($self) = @_;
-      my $root = $ENV{CODEX_HOME} // "$ENV{HOME}/.codex";
-      my $sessions_dir = "$root/sessions";
-      return () unless -d $sessions_dir;
-  
-      my @files = _find_session_files($sessions_dir);
-      my @sessions;
-      for my $file (@files) {
-          my $s = _parse_session($file, $self) or next;
-          push @sessions, $s;
-      }
-      return @sessions;
-  }
-  
-  sub running {
-      # Codex has no running-session registry we can check without shelling out
-      return ();
-  }
-  
-  sub launch {
-      my ($self, $sessions, $launcher) = @_;
-      for my $s (@$sessions) {
-          my $cmd = "cd \Q$s->{cwd}\E && codex resume \Q$s->{_file}\E";
-          Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
-      }
-  }
-  
-  sub delete_session {
-      my ($self, $session) = @_;
-      return unlink $session->{_file};
-  }
-  
-  sub load_messages {
-      my ($self, $session) = @_;
-      my @messages;
-      open my $fh, '<', $session->{_file} or return @messages;
-      while (my $line = <$fh>) {
-          my $obj     = eval { JSON::PP::decode_json($line) } or next;
-          my $type    = $obj->{type}    // '';
-          my $payload = $obj->{payload} // {};
-  
-          if ($type eq 'event_msg' && ($payload->{type} // '') eq 'user_message') {
-              my $text = $payload->{message} // '';
-              push @messages, { role => 'user', text => $text } if length $text;
-          }
-          elsif ($type eq 'response_item' && ($payload->{role} // '') eq 'assistant') {
-              my $text = _extract_text($payload->{content});
-              push @messages, { role => 'assistant', text => $text } if length $text;
-          }
-      }
-      close $fh;
-      return @messages;
-  }
-  
-  # ── private helpers ───────────────────────────────────────────────────────────
-  
-  # Walk the date-sharded sessions directory: sessions/YYYY/MM/DD/*.jsonl
-  sub _find_session_files {
-      my ($root) = @_;
-      my @files;
-      opendir my $dh, $root or return @files;
-      for my $year (sort readdir $dh) {
-          next unless $year =~ /^\d{4}$/;
-          my $ydir = "$root/$year";
-          opendir my $mdh, $ydir or next;
-          for my $month (sort readdir $mdh) {
-              next unless $month =~ /^\d{2}$/;
-              my $mdir = "$ydir/$month";
-              opendir my $ddh, $mdir or next;
-              for my $day (sort readdir $ddh) {
-                  next unless $day =~ /^\d{2}$/;
-                  my $ddir = "$mdir/$day";
-                  opendir my $fdh, $ddir or next;
-                  for my $file (sort readdir $fdh) {
-                      next unless $file =~ /^rollout-.*\.jsonl$/;
-                      push @files, "$ddir/$file";
-                  }
-                  closedir $fdh;
-              }
-              closedir $ddh;
-          }
-          closedir $mdh;
-      }
-      closedir $dh;
-  
-      # Also check archived sessions
-      my $archived = "$root/archived_sessions";
-      if (-d $archived) {
-          opendir my $adh, $archived or return @files;
-          for my $file (sort readdir $adh) {
-              next unless $file =~ /^rollout-.*\.jsonl$/;
-              push @files, "$archived/$file";
-          }
-          closedir $adh;
-      }
-  
-      return @files;
-  }
-  
-  sub _parse_session {
-      my ($file, $adapter) = @_;
-  
-      open my $fh, '<', $file or return undef;
-  
-      my ($id, $cwd, $title);
-      while (my $line = <$fh>) {
-          my $obj = eval { JSON::PP::decode_json($line) } or next;
-          my $type    = $obj->{type}    // '';
-          my $payload = $obj->{payload} // {};
-  
-          if ($type eq 'session_meta') {
-              $id  //= $payload->{id};
-              $cwd //= $payload->{cwd};
-          }
-          elsif ($type eq 'event_msg' && ($payload->{type} // '') eq 'user_message') {
-              $title //= $payload->{message};
-          }
-  
-          last if $id && $cwd && $title;
-      }
-      close $fh;
-  
-      return undef unless $id;
-      $cwd   //= $ENV{HOME};
-      $title //= '(no title)';
-  
-      # Parse timestamp from filename: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
-      my ($date_str, $epoch) = ('0000-00-00', 0);
-      if ($file =~ /rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/) {
-          $date_str = "$1-$2-$3T$4:$5:$6";
-          $epoch    = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
-      }
-  
-      return {
-          id       => $id,
-          title    => $title,
-          date     => $date_str,
-          epoch    => $epoch,
-          cwd      => $cwd,
-          project  => $cwd,
-          _file    => $file,
-          _size    => (-s $file) // 0,
-          _adapter => $adapter,
-      };
-  }
-  
-  sub _extract_text {
-      my ($content) = @_;
-      return '' unless defined $content;
-      return $content unless ref $content;
-      return join '', map { ref $_ eq 'HASH' && ($_->{type}//'') eq 'text' ? $_->{text} : '' }
-                      ref $content eq 'ARRAY' ? @$content : ();
-  }
-  
-  1;
-SAISONS_ADAPTER_CODEX
-
-$fatpacked{"Saisons/Adapter/Gemini.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_ADAPTER_GEMINI';
-  package Saisons::Adapter::Gemini;
-  use strict;
-  use warnings;
-  use JSON::PP ();
-  use POSIX qw();
-  use Saisons::Launcher ();
-  
-  # Gemini CLI stores sessions under ~/.gemini/tmp/<project-slug>/chats/
-  # Each file is named: session-YYYY-MM-DDTHH-MM-<uuid8>.jsonl
-  # First line is a metadata record with sessionId, summary, startTime, projectHash.
-  # Subsequent lines are message records with type "user" | "gemini".
-  # Resume with: gemini --resume <UUID>
-  
-  sub new { bless {}, shift }
-  
-  sub name      { 'Gemini' }
-  sub tag       { "\x{2726} Gem" }
-  sub tag_color { 'bold blue' }
-  
-  sub find_sessions {
-      my ($self) = @_;
-      my $tmp = "$ENV{HOME}/.gemini/tmp";
-      return () unless -d $tmp;
-  
-      my @sessions;
-      opendir my $dh, $tmp or return ();
-      for my $slug (readdir $dh) {
-          next if $slug =~ /^\./;
-          my $chats_dir = "$tmp/$slug/chats";
-          next unless -d $chats_dir;
-          opendir my $cdh, $chats_dir or next;
-          for my $file (readdir $cdh) {
-              next unless $file =~ /^session-.*\.jsonl$/;
-              my $s = _parse_session("$chats_dir/$file", $self) or next;
-              push @sessions, $s;
-          }
-          closedir $cdh;
-      }
-      closedir $dh;
-      return @sessions;
-  }
-  
-  sub running {
-      return ();
-  }
-  
-  sub launch {
-      my ($self, $sessions, $launcher) = @_;
-      for my $s (@$sessions) {
-          my $cmd = "cd \Q$s->{cwd}\E && gemini --resume \Q$s->{id}\E";
-          Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
-      }
-  }
-  
-  sub delete_session {
-      my ($self, $session) = @_;
-      return unlink $session->{_file};
-  }
-  
-  sub load_messages {
-      my ($self, $session) = @_;
-      my @messages;
-      open my $fh, '<', $session->{_file} or return @messages;
-      my $first = 1;
-      while (my $line = <$fh>) {
-          if ($first) { $first = 0; next }  # skip metadata line
-          my $obj  = eval { JSON::PP::decode_json($line) } or next;
-          my $type = $obj->{type} // '';
-          next unless $type eq 'user' || $type eq 'gemini';
-          my $role = $type eq 'user' ? 'user' : 'assistant';
-          my $text = $obj->{displayContent} // _extract_text($obj->{content});
-          push @messages, { role => $role, text => $text } if length($text // '');
-      }
-      close $fh;
-      return @messages;
-  }
-  
-  # ── private helpers ───────────────────────────────────────────────────────────
-  
-  sub _parse_session {
-      my ($file, $adapter) = @_;
-  
-      open my $fh, '<', $file or return undef;
-  
-      my ($id, $title, $date_str, $epoch, $cwd);
-      my $first = 1;
-      while (my $line = <$fh>) {
-          my $obj = eval { JSON::PP::decode_json($line) } or next;
-  
-          if ($first) {
-              $first = 0;
-              $id  = $obj->{sessionId} or return undef;
-              $title = $obj->{summary} if $obj->{summary};
-  
-              if (my $ts = $obj->{startTime} // $obj->{lastUpdated}) {
-                  if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
-                      $date_str = "$1-$2-$3T$4:$5:$6";
-                      # Timestamps are UTC — convert using timegm equivalent via POSIX
-                      local $ENV{TZ} = 'UTC';
-                      POSIX::tzset();
-                      $epoch = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
-                      delete $ENV{TZ};
-                      POSIX::tzset();
-                  }
-              }
-  
-              $cwd = $ENV{HOME};
-              if (ref $obj->{directories} eq 'ARRAY' && @{ $obj->{directories} }) {
-                  $cwd = $obj->{directories}[0];
-              }
-              next;
-          }
-  
-          # First user message as title fallback
-          if (!$title && ($obj->{type} // '') eq 'user') {
-              my $text = _extract_text($obj->{content});
-              $title = $text if length($text // '');
-              last;
-          }
-      }
-      close $fh;
-  
-      return undef unless $id;
-      $date_str //= '0000-00-00';
-      $epoch    //= 0;
-      $title    //= '(no title)';
-      $cwd      //= $ENV{HOME};
-  
-      return {
-          id       => $id,
-          title    => $title,
-          date     => $date_str,
-          epoch    => $epoch,
-          cwd      => $cwd,
-          project  => $cwd,
-          _file    => $file,
-          _size    => (-s $file) // 0,
-          _adapter => $adapter,
-      };
-  }
-  
-  sub _extract_text {
-      my ($content) = @_;
-      return '' unless defined $content;
-      return $content unless ref $content;
-      if (ref $content eq 'ARRAY') {
-          return join '', map { ref $_ eq 'HASH' ? ($_->{text} // '') : '' } @$content;
-      }
-      return $content->{text} // '';
-  }
-  
-  1;
-SAISONS_ADAPTER_GEMINI
-
-$fatpacked{"Saisons/Adapter/Opencode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_ADAPTER_OPENCODE';
-  package Saisons::Adapter::Opencode;
-  use strict;
-  use warnings;
-  use JSON::PP ();
-  use POSIX qw();
-  use Saisons::Launcher ();
-  
-  # opencode stores sessions under $XDG_DATA_HOME/opencode/storage/session/<projectID>/
-  # Each session is a directory containing message JSON files.
-  # The session metadata is in a file named with the session UUID.
-  # Resume with: opencode --session <sessionID>
-  
-  sub new { bless {}, shift }
-  
-  sub name      { 'opencode' }
-  sub tag       { "\x{2336} Opc" }
-  sub tag_color { 'bold magenta' }
-  
-  sub find_sessions {
-      my ($self) = @_;
-      my $data_home = $ENV{XDG_DATA_HOME} // "$ENV{HOME}/.local/share";
-      my $storage   = "$data_home/opencode/storage/session";
-      return () unless -d $storage;
-  
-      my @sessions;
-      opendir my $dh, $storage or return ();
-      for my $project_id (readdir $dh) {
-          next if $project_id =~ /^\./;
-          my $project_dir = "$storage/$project_id";
-          next unless -d $project_dir;
-          opendir my $pdh, $project_dir or next;
-          for my $file (readdir $pdh) {
-              next if $file =~ /^\./;
-              my $path = "$project_dir/$file";
-              next unless -f $path && $file =~ /\.json$/;
-              my $s = _parse_session($path, $self) or next;
-              push @sessions, $s;
-          }
-          closedir $pdh;
-      }
-      closedir $dh;
-      return @sessions;
-  }
-  
-  sub running {
-      return ();
-  }
-  
-  sub launch {
-      my ($self, $sessions, $launcher) = @_;
-      for my $s (@$sessions) {
-          my $cmd = "cd \Q$s->{cwd}\E && opencode --session \Q$s->{id}\E";
-          Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
-      }
-  }
-  
-  sub delete_session {
-      my ($self, $session) = @_;
-      return unlink $session->{_file};
-  }
-  
-  sub load_messages {
-      my ($self, $session) = @_;
-      my @messages;
-      open my $fh, '<', $session->{_file} or return @messages;
-      my $json = do { local $/; <$fh> };
-      close $fh;
-      my $obj = eval { JSON::PP::decode_json($json) } or return @messages;
-  
-      my $msgs = $obj->{messages} // [];
-      for my $msg (@$msgs) {
-          my $role = $msg->{role} // '';
-          next unless $role eq 'user' || $role eq 'assistant';
-          my $text = _extract_text($msg->{content});
-          push @messages, { role => $role, text => $text } if length($text // '');
-      }
-      return @messages;
-  }
-  
-  # ── private helpers ───────────────────────────────────────────────────────────
-  
-  sub _parse_session {
-      my ($file, $adapter) = @_;
-  
-      open my $fh, '<', $file or return undef;
-      my $json = do { local $/; <$fh> };
-      close $fh;
-      my $obj = eval { JSON::PP::decode_json($json) } or return undef;
-  
-      my $id  = $obj->{id}  or return undef;
-      my $cwd = $obj->{cwd} // $ENV{HOME};
-  
-      my $title = $obj->{title} // $obj->{summary};
-      if (!$title) {
-          for my $msg (@{ $obj->{messages} // [] }) {
-              next unless ($msg->{role} // '') eq 'user';
-              $title = _extract_text($msg->{content});
-              last if length($title // '');
-          }
-      }
-      $title //= '(no title)';
-  
-      my ($date_str, $epoch) = ('0000-00-00', 0);
-      if (my $ts = $obj->{createdAt} // $obj->{updatedAt}) {
-          if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
-              $date_str = "$1-$2-$3T$4:$5:$6";
-              local $ENV{TZ} = 'UTC';
-              POSIX::tzset();
-              $epoch = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
-              delete $ENV{TZ};
-              POSIX::tzset();
-          }
-      }
-  
-      return {
-          id       => $id,
-          title    => $title,
-          date     => $date_str,
-          epoch    => $epoch,
-          cwd      => $cwd,
-          project  => $cwd,
-          _file    => $file,
-          _size    => (-s $file) // 0,
-          _adapter => $adapter,
-      };
-  }
-  
-  sub _extract_text {
-      my ($content) = @_;
-      return '' unless defined $content;
-      return $content unless ref $content;
-      if (ref $content eq 'ARRAY') {
-          return join '', map {
-              ref $_ eq 'HASH' ? ($_->{text} // '') : (ref $_ ? '' : $_)
-          } @$content;
-      }
-      return $content->{text} // '';
-  }
-  
-  1;
-SAISONS_ADAPTER_OPENCODE
-
-$fatpacked{"Saisons/Launcher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_LAUNCHER';
-  package Saisons::Launcher;
-  use strict;
-  use warnings;
-  
-  # Launch a shell command in a new terminal tab/window according to $launcher.
-  # $title is used as the tab/window title where supported.
-  sub launch_cmd {
-      my ($cmd, $cwd, $launcher, $title) = @_;
-      $title //= 'saisons';
-  
-      if ($launcher eq 'tmux') {
-          system('tmux', 'new-window', '-c', $cwd, $cmd);
-      }
-      elsif ($launcher eq 'screen') {
-          system('screen', '-X', 'screen', '-t', substr($title, 0, 20),
-                 'bash', '-c', "$cmd; exec bash");
-      }
-      elsif ($launcher eq 'gnome-terminal') {
-          system('gnome-terminal', '--tab', "--working-directory=$cwd",
-                 '--', 'bash', '--login', '-c', $cmd);
-      }
-      elsif ($launcher eq 'iterm') {
-          my $escaped = _applescript_quote($cmd);
-          my $script = qq{
-              tell application "iTerm2"
-                  tell current window
-                      create tab with default profile
-                      tell current session of current tab
-                          write text $escaped
-                      end tell
-                  end tell
-              end tell
-          };
-          system('osascript', '-e', $script);
-      }
-      elsif ($launcher eq 'terminal-app') {
-          my $escaped = _applescript_quote($cmd);
-          my $script = qq{
-              tell application "Terminal"
-                  do script $escaped
-                  activate
-              end tell
-          };
-          system('osascript', '-e', $script);
-      }
-      else {
-          system('bash', '-c', $cmd);
-      }
-  }
-  
-  sub _applescript_quote {
-      my ($str) = @_;
-      $str =~ s/\\/\\\\/g;
-      $str =~ s/"/\\"/g;
-      return qq{"$str"};
-  }
-  
-  1;
-SAISONS_LAUNCHER
-
-$fatpacked{"Saisons/UI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'SAISONS_UI';
-  package Saisons::UI;
-  use strict;
-  use warnings;
-  use utf8;
-  use POSIX qw();           # for Termios (raw terminal mode)
-  use Term::ANSIColor qw(colored color);
-  use JSON::PP ();
-  
-  # Where we persist the user's selection and view mode between runs
-  my $STATE_FILE = "$ENV{HOME}/.config/saisons/state.json";
-  
-  # ── Color helpers ─────────────────────────────────────────────────────────────
-  # Two kinds of helpers:
-  #
-  # _col_*()  — emit just the ANSI start code, no reset. Use inside a row that
-  #              ends with a single RESET. This way no mid-line \e[0m breaks an
-  #              outer highlight (e.g. reverse video or a background color).
-  #
-  # _str_*()  — wrap a string with start + reset. Use for standalone colored
-  #              strings outside of a row (headers, prompts, messages).
-  
-  use constant RESET => color('reset');
-  
-  sub _col_yellow  { color('yellow') }
-  sub _col_cyan    { color('cyan') }
-  sub _col_green   { color('green') }
-  sub _col_white   { color('white') }
-  sub _col_boldgrn { color('bold green') }
-  sub _col_sel     { color('black on_cyan') }
-  sub _col_active  { color('white on_blue') }
-  
-  sub _str_bold    { colored($_[0], 'bold') }
-  sub _str_dim     { colored($_[0], 'faint') }
-  sub _str_boldyel { colored($_[0], 'bold yellow') }
-  sub _str_boldcyn { colored($_[0], 'bold cyan') }
-  sub _str_boldgrn { colored($_[0], 'bold green') }
-  sub _str_boldred { colored($_[0], 'bold red') }
-  
-  sub new { bless {}, shift }
-  
-  # ── Persisted state ───────────────────────────────────────────────────────────
-  # Saves/restores which sessions are selected and whether grouped mode is on.
-  
-  sub _load_state {
-      open my $fh, '<', $STATE_FILE or return {};
-      my $json = do { local $/; <$fh> };
-      close $fh;
-      eval { JSON::PP::decode_json($json) } // {};
-  }
-  
-  sub _save_state {
-      my ($state) = @_;
-      (my $dir = $STATE_FILE) =~ s|/[^/]+$||;
-      mkdir $dir unless -d $dir;
-      open my $fh, '>', $STATE_FILE or return;
-      print $fh JSON::PP::encode_json($state);
-      close $fh;
-  }
-  
-  # ── Raw terminal mode ─────────────────────────────────────────────────────────
-  # We switch the terminal to raw mode so we can read individual keypresses
-  # without waiting for Enter. POSIX::Termios lets us do this portably.
-  # _init_term() saves the original settings so _restore_term() can put them back.
-  
-  my ($OLD_TERM, $ROWS, $COLS);
-  
-  sub _init_term {
-      binmode STDOUT, ':utf8';
-      STDOUT->autoflush(1);
-      ($ROWS, $COLS) = _term_size();
-      my $tty = \*STDIN;
-      $OLD_TERM = POSIX::Termios->new;
-      $OLD_TERM->getattr(fileno($tty));
-      my $raw = POSIX::Termios->new;
-      $raw->getattr(fileno($tty));
-      # Disable ECHO (don't print typed chars) and ICANON (don't wait for newline)
-      $raw->setlflag($raw->getlflag & ~(POSIX::ECHO | POSIX::ICANON));
-      $raw->setcc(POSIX::VMIN, 1);   # return after 1 byte
-      $raw->setcc(POSIX::VTIME, 0);  # no timeout
-      $raw->setattr(fileno($tty), POSIX::TCSANOW);
-  }
-  
-  sub _restore_term {
-      $OLD_TERM->setattr(fileno(\*STDIN), POSIX::TCSANOW) if $OLD_TERM;
-  }
-  
-  sub _term_size {
-      # Ask the terminal for its dimensions via stty
-      my $s = `stty size 2>/dev/null`;
-      return ($s =~ /^(\d+)\s+(\d+)/) ? ($1, $2) : (40, 120);
-  }
-  
-  # ── Keypress reader ───────────────────────────────────────────────────────────
-  # Reads a single keypress and returns a string name for it.
-  # Arrow keys and special keys send multi-byte escape sequences: ESC [ X
-  # We use select() with a 50ms timeout to distinguish a lone ESC keypress
-  # from the start of an escape sequence.
-  
-  sub _read_key {
-      my $c = '';
-      sysread STDIN, $c, 1;
-  
-      if ($c eq "\033") {
-          # Check if more bytes follow within 50ms (escape sequence vs lone ESC)
-          my $rin = '';
-          vec($rin, fileno(STDIN), 1) = 1;
-          return 'ESC' unless select($rin, undef, undef, 0.05);
-  
-          my $c2 = '';
-          sysread STDIN, $c2, 1;
-          if ($c2 eq '[') {
-              my $c3 = '';
-              sysread STDIN, $c3, 1;
-              return 'UP'    if $c3 eq 'A';
-              return 'DOWN'  if $c3 eq 'B';
-              return 'RIGHT' if $c3 eq 'C';
-              return 'LEFT'  if $c3 eq 'D';
-              if ($c3 =~ /[0-9]/) {
-                  # Extended sequences end with ~: e.g. ESC [ 5 ~  = Page Up
-                  my $c4 = ''; sysread STDIN, $c4, 1;
-                  return 'PGUP'   if $c3 eq '5';
-                  return 'PGDN'   if $c3 eq '6';
-                  return 'HOME'   if $c3 eq '1';
-                  return 'END'    if $c3 eq '4';
-                  return 'DELETE' if $c3 eq '3';
-                  return 'IGNORE';
-              }
-              return 'IGNORE';
-          }
-          return 'ESC';
-      }
-  
-      return $c;
-  }
-  
-  # ── Main interactive list ─────────────────────────────────────────────────────
-  # Shows a scrollable list of sessions. The user navigates with arrow keys,
-  # toggles selection with Enter, and opens sessions with 'o'.
-  # Returns a list of selected session hashrefs, or empty list if cancelled.
-  
-  sub interactive_select {
-      my ($self, $sessions, $running) = @_;
-      $running //= {};
-  
-      # Restore previous selection and view mode
-      my $state   = _load_state();
-      my %sel_ids = map { $_ => 1 } @{ $state->{selected} // [] };
-      my $grouped = $state->{grouped} // 0;  # 0 = flat (default)
-      my $cursor  = 0;
-      my $offset      = 0;   # index of the first visible row
-      my $filter      = '';  # metadata filter: title/path/date (fast, no file I/O)
-      my $fulltext    = '';  # full-text filter: searches message content (slower)
-  
-      my @sort_cols = qw(selected running agent date size session path title);
-      my $sort_idx  = 0;   # index into @sort_cols — starts on 'selected'
-      my $sort_rev  = 0;   # 0 = normal, 1 = reversed
-  
-      _init_term();
-      local $SIG{INT} = sub { _restore_term(); print "\033[?25h\033[0m\n"; STDOUT->flush(); exit 0 };
-      print "\033[?25l";  # hide blinking cursor
-  
-      my @result;
-  
-      while (1) {
-          ($ROWS, $COLS) = _term_size();
-  
-          # Apply filters — metadata filter is instant, fulltext scans files
-          my @filtered = grep { ref $_ eq 'HASH' } @$sessions;
-          if ($filter) {
-              my $re = eval { qr/\Q$filter\E/i } // qr/(?!)/;
-              @filtered = grep {
-                  $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re
-              } @filtered;
-          }
-          if ($fulltext) {
-              @filtered = grep { _search_content($_, $fulltext) } @filtered;
-          }
-          my $visible_sessions = \@filtered;
-  
-          my $sort_col = $sort_cols[$sort_idx];
-          my @entries = _build_entries($visible_sessions, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
-          my $n       = scalar @entries;
-          my $visible = $ROWS - 3 - 1;  # header + sep + footer + 1-line banner
-  
-          # Keep cursor and scroll offset within valid bounds
-          $cursor = 0      if $cursor < 0;
-          $cursor = $n - 1 if $cursor >= $n && $n;
-          # Skip over header rows — cursor must always land on a session row
-          $cursor++ while $cursor < $n - 1 && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
-          $cursor-- while $cursor > 0      && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
-          if ($n <= $visible) {
-              $offset = 0;
-          } else {
-              my $max = $n - $visible;
-              $offset = $max if $offset > $max;
-              $offset = $cursor              if $cursor < $offset;
-              $offset = $cursor - $visible + 1 if $cursor >= $offset + $visible;
-              $offset = 0 if $offset < 0;
-          }
-  
-          _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev);
-  
-          my $key = _read_key();
-  
-          if ($key eq 'UP' || $key eq 'k') {
-              $cursor--;
-              # Skip over group header rows — they are not selectable
-              $cursor-- while $cursor > 0 && $entries[$cursor]{type} eq 'header';
-          }
-          elsif ($key eq 'DOWN' || $key eq 'j') {
-              $cursor++;
-              $cursor++ while $cursor < $n-1 && $entries[$cursor]{type} eq 'header';
-          }
-          elsif ($key eq 'PGUP') { $cursor -= $visible; $offset -= $visible }
-          elsif ($key eq 'PGDN') { $cursor += $visible; $offset += $visible }
-          elsif ($key eq 'HOME' || $key eq 'g') { $cursor = 0; $offset = 0 }
-          elsif ($key eq 'END'  || $key eq 'G') { $cursor = $n - 1 }
-          elsif ($key eq ' ') {
-              # Toggle selection on the session under the cursor
-              my $e = $entries[$cursor];
-              if ($e && $e->{type} eq 'session') {
-                  my $id = $e->{session}{id};
-                  $sel_ids{$id} ? delete $sel_ids{$id} : ($sel_ids{$id} = 1);
-              }
-          }
-          elsif ($key eq "\n" || $key eq "\r") {
-              # Open selected sessions (or cursor session if none selected)
-              my @to_open = _selected_sessions(\%sel_ids, $sessions);
-              unless (@to_open) {
-                  my $e = $entries[$cursor];
-                  push @to_open, $e->{session} if $e && $e->{type} eq 'session';
-              }
-              if (@to_open) {
-                  my @already_running = grep { $running->{ $_->{id} } } @to_open;
-                  if (@already_running) {
-                      my $ans = _confirm(scalar(@already_running) . " session(s) already running. Open anyway? [y/N] ");
-                      next unless $ans =~ /^y/i;
-                  }
-                  _save_state({ selected => [map { $_->{id} } @to_open], grouped => $grouped });
-                  @result = @to_open;
-                  last;
-              }
-          }
-          elsif ($key eq 'a') {
-              # Select all sessions
-              $sel_ids{$_->{id}} = 1 for grep { $_->{type} eq 'session' } @entries;
-          }
-          elsif ($key eq 'A') {
-              # Deselect all
-              %sel_ids = ();
-          }
-          elsif ($key eq 's' || $key eq 'S') {
-              my $new_rev = $key eq 'S' ? 1 : 0;
-              my ($new_idx) = _sort_popup(\@sort_cols, $sort_idx, $new_rev);
-              if (defined $new_idx) {
-                  $sort_idx = $new_idx;
-                  $sort_rev = $new_rev;
-                  $cursor = 0; $offset = 0;
-              }
-          }
-          elsif ($key eq 't') {
-              # Toggle between flat (date order) and grouped (by directory) view
-              $grouped = !$grouped;
-              $cursor = 0; $offset = 0;
-          }
-          elsif ($key eq 'r') {
-              # Re-scan which sessions are currently running
-              my %seen;
-              %$running = ();
-              for my $s (@$sessions) {
-                  next if $seen{ref $s->{_adapter}}++;
-                  %$running = (%$running, $s->{_adapter}->running);
-              }
-          }
-          elsif ($key eq 'v') {
-              # View conversation history for the session under the cursor
-              my $e = $entries[$cursor];
-              if ($e && $e->{type} eq 'session') {
-                  _restore_term(); print "\033[?25h";
-                  _peek($e->{session});
-                  _init_term(); print "\033[?25l";
-              }
-          }
-          elsif ($key eq 'd' || $key eq 'DELETE') {
-              # Delete selected sessions, or the one under the cursor if none selected
-              my @to_del = _selected_sessions(\%sel_ids, $sessions);
-              unless (@to_del) {
-                  my $e = $entries[$cursor];
-                  push @to_del, $e->{session} if $e && $e->{type} eq 'session';
-              }
-              if (@to_del) {
-                  _do_delete(\@to_del, $sessions, \%sel_ids);
-                  $cursor = 0; $offset = 0;
-              }
-          }
-          elsif ($key eq 'm') {
-              # Move selected sessions to a different directory
-              my @to_move = _selected_sessions(\%sel_ids, $sessions);
-              if (@to_move) {
-                  _restore_term(); print "\033[?25h";
-                  _do_move(\@to_move, $sessions, \%sel_ids);
-                  $cursor = 0; $offset = 0;
-                  _init_term(); print "\033[?25l";
-              }
-          }
-          elsif ($key eq '/' || $key eq '?') {
-              # Incremental search — stay in raw mode, update list on every keystroke
-              my $is_fulltext = $key eq '?';
-              my $prompt      = $is_fulltext
-                  ? colored('?search: ', 'bold yellow')
-                  : colored('/filter: ', 'bold cyan');
-              my $query = $is_fulltext ? $fulltext : $filter;
-  
-              while (1) {
-                  # For metadata filter: update list live on every keystroke.
-                  # For full-text search: only show current results (applied on Enter).
-                  my @f2 = grep { ref $_ eq 'HASH' } @$sessions;
-                  if (!$is_fulltext && $query) {
-                      my $re = eval { qr/\Q$query\E/i } // qr/(?!)/;
-                      @f2 = grep { $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re } @f2;
-                  } elsif ($is_fulltext && $fulltext) {
-                      # Show previously applied fulltext results while typing new query
-                      my $re = eval { qr/\Q$fulltext\E/i } // qr/(?!)/;
-                      @f2 = grep { _search_content($_, $fulltext) } @f2;
-                  }
-                  ($ROWS, $COLS) = _term_size();
-                  my $sort_col = $sort_cols[$sort_idx];
-                  my @e2   = _build_entries(\@f2, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
-                  my $n2   = scalar @e2;
-                  my $vis2 = $ROWS - 3 - 1;
-                  my $cur2 = 0;
-                  $cur2++ while $cur2 < $n2 - 1 && $e2[$cur2] && $e2[$cur2]{type} eq 'header';
-                  _render(\@e2, $cur2, 0, $vis2, \%sel_ids, $grouped, $running,
-                      ($is_fulltext ? $filter : $query),
-                      ($is_fulltext ? $query  : $fulltext),
-                      $sort_col, $sort_rev);
-                  # Overwrite footer with search prompt + current query
-                  print "\033[${ROWS};1H\033[K";
-                  my $hint = $is_fulltext ? ' (ENTER=search ESC=cancel)' : ' (ENTER=apply ESC=cancel)';
-                  print $prompt . colored($query, 'bold white') . colored($hint, 'faint');
-                  STDOUT->flush();
-  
-                  my $ch = _read_key();
-                  if ($ch eq "\n" || $ch eq "\r") {
-                      # Apply query — for fulltext this triggers the file scan
-                      if ($is_fulltext) { $fulltext = $query } else { $filter = $query }
-                      $cursor = 0; $offset = 0;
-                      last;
-                  } elsif ($ch eq 'ESC') {
-                      last;  # cancel — don't apply
-                  } elsif ($ch eq 'BACKSPACE' || $ch eq "\x7f" || $ch eq "\x08") {
-                      $query = substr($query, 0, -1) if length($query);
-                  } elsif (length($ch) == 1 && $ch ge ' ') {
-                      $query .= $ch;
-                  }
-              }
-          }
-          elsif ($key eq 'ESC') {
-              if ($filter || $fulltext) {
-                  # ESC clears active filters
-                  $filter = ''; $fulltext = '';
-                  $cursor = 0; $offset = 0;
-              } else {
-                  _save_state({ selected => [keys %sel_ids], grouped => $grouped });
-                  last;
-              }
-          }
-          elsif ($key eq 'q') {
-              # Save current selection so it's restored next time
-              _save_state({ selected => [keys %sel_ids], grouped => $grouped });
-              last;
-          }
-      }
-  
-      _restore_term();
-      print "\033[?25h\033[2J\033[H\033[0m";  # show cursor, clear screen, reset all attributes
-      STDOUT->flush();
-      return @result;
-  }
-  
-  # Returns the session hashrefs for all currently selected session IDs
-  sub _selected_sessions {
-      my ($sel_ids, $sessions) = @_;
-      my %by_id = map { $_->{id} => $_ } @$sessions;
-      return map { $by_id{$_} } grep { $by_id{$_} } keys %$sel_ids;
-  }
-  
-  # ── Entry list builder ────────────────────────────────────────────────────────
-  # Converts the flat sessions array into a list of display entries.
-  # In grouped mode, inserts header entries before each directory's sessions.
-  # Each entry is either: { type => 'session', session => $hashref }
-  #                    or: { type => 'header',  label   => $dir_path }
-  
-  my %SORT_CMP = (
-      selected => sub { ($_[1]{_sel}  // 0) <=> ($_[0]{_sel}  // 0) },
-      running  => sub { ($_[1]{_run}  // 0) <=> ($_[0]{_run}  // 0) },
-      agent    => sub { _adapter_tag($_[0]{_adapter}, 1) cmp _adapter_tag($_[1]{_adapter}, 1) },
-      date     => sub { $_[0]{date}          cmp $_[1]{date}          },
-      size     => sub { ($_[0]{_size} // 0) <=> ($_[1]{_size} // 0)  },
-      session  => sub { $_[0]{id}            cmp $_[1]{id}            },
-      path     => sub { $_[0]{cwd}           cmp $_[1]{cwd}           },
-      title    => sub { lc($_[0]{title})     cmp lc($_[1]{title})     },
-  );
-  
-  sub _sorted {
-      my ($sessions, $sort_col, $sort_rev, $sel_ids, $running) = @_;
-      my $cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
-      # Annotate with sel/run flags for sorting, then strip after
-      my @ann = map { { %$_, _sel => $sel_ids->{$_->{id}} ? 1 : 0,
-                                _run => $running->{$_->{id}} ? 1 : 0 } } @$sessions;
-      my @sorted = sort { $cmp->($a, $b) } @ann;
-      # reverse when descending is requested
-      @sorted = reverse @sorted if $sort_rev;
-      return @sorted;
-  }
-  
-  sub _build_entries {
-      my ($sessions, $running, $sel_ids, $grouped, $sort_col, $sort_rev) = @_;
-      $sort_col //= 'date';
-  
-      my @valid = grep { ref $_ eq 'HASH' } @$sessions;
-  
-      if ($grouped) {
-          my %by_dir;
-          push @{ $by_dir{$_->{cwd}} }, $_ for @valid;
-  
-          # Sort sessions within each group, then sort groups by their first (top) session
-          my %sorted_dir;
-          for my $dir (keys %by_dir) {
-              $sorted_dir{$dir} = [ _sorted($by_dir{$dir}, $sort_col, $sort_rev, $sel_ids, $running) ];
-          }
-          my $dir_cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
-          my @dirs = sort {
-              my $ann_a = { %{$sorted_dir{$a}[0]}, _sel => $sel_ids->{$sorted_dir{$a}[0]{id}} ? 1 : 0,
-                                                    _run => $running->{$sorted_dir{$a}[0]{id}} ? 1 : 0 };
-              my $ann_b = { %{$sorted_dir{$b}[0]}, _sel => $sel_ids->{$sorted_dir{$b}[0]{id}} ? 1 : 0,
-                                                    _run => $running->{$sorted_dir{$b}[0]{id}} ? 1 : 0 };
-              $dir_cmp->($ann_a, $ann_b) || $a cmp $b
-          } keys %sorted_dir;
-          @dirs = reverse @dirs if $sort_rev;
-  
-          my @entries;
-          for my $dir (@dirs) {
-              push @entries, { type => 'header', label => $dir };
-              push @entries, map { { type => 'session', session => $_ } } @{ $sorted_dir{$dir} };
-          }
-          return @entries;
-      }
-  
-      return map { { type => 'session', session => $_ } }
-                 _sorted(\@valid, $sort_col, $sort_rev, $sel_ids, $running);
-  }
-  
-  # Truncates a path to fit in $width columns, adding '...' prefix if needed
-  sub _truncate_path {
-      my ($path, $width) = @_;
-      return sprintf "%-${width}s", length($path) > $width
-          ? '...' . substr($path, -($width - 3))
-          : $path;
-  }
-  
-  # ── Search ────────────────────────────────────────────────────────────────────
-  
-  # Returns true if the session's conversation content matches the query string.
-  # Uses grep for speed — no need to parse the full file in Perl.
-  sub _search_content {
-      my ($session, $query) = @_;
-  
-      # Always match on title and path (fast, no file I/O)
-      return 1 if index(lc($session->{title}), lc($query)) >= 0;
-      return 1 if index(lc($session->{cwd}),   lc($query)) >= 0;
-  
-      # Search the session file for the query string (case-insensitive)
-      my $file = $session->{_file} or return 0;
-      return 0 unless -f $file;
-      my $re = eval { qr/\Q$query\E/i } or return 0;
-      open my $fh, '<', $file or return 0;
-      while (<$fh>) {
-          if (/$re/) { close $fh; return 1 }
-      }
-      close $fh;
-      return 0;
-  }
-  
-  # ── Title banner ─────────────────────────────────────────────────────────────
-  
-  sub _banner {
-      my ($cols) = @_;
-  
-      # Fullwidth letters have broad terminal font support unlike math italic
-      my @letters = split //, "\x{FF33}\x{FF21}\x{FF29}\x{FF33}\x{FF2F}\x{FF2E}\x{FF33}";
-      my @colors  = ('bold red', 'bold yellow', 'bold green', 'bold cyan', 'bold blue', 'bold magenta', 'bold red');
-      my $title   = join '', map { colored($letters[$_], $colors[$_]) } 0..$#letters;
-  
-      my $author      = "v$Saisons::VERSION  by Nicolas Mendoza  \x{00a9} 2026";
-      my $title_vis   = scalar @letters * 2;  # fullwidth chars are 2 columns wide
-      my $pad         = $cols - $title_vis - length($author);
-      $pad = 2 if $pad < 2;
-  
-      my $art_str = $title . _str_dim(' ' x $pad . $author) . "\033[K\n";
-  
-      return $art_str;
-  }
-  
-  # ── Screen renderer ───────────────────────────────────────────────────────────
-  # Draws the full UI: header, session list, scrollbar, footer.
-  # Called on every keypress since the whole screen is redrawn each time.
-  
-  sub _render {
-      my ($entries, $cursor, $offset, $visible, $sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev) = @_;
-      $sort_col //= 'date';
-      my $sort_arrow = $sort_rev ? "\x{2193}" : "\x{2191}";  # ↓ or ↑
-  
-      my $n    = scalar @$entries;
-      my $cols = $COLS;
-  
-      # Title banner: 1 line (fullwidth letters + author right-aligned)
-      my $banner = _banner($cols);
-      my $banner_lines = 1;
-  
-      # Fixed column widths
-      my $rel_w    = 8;   # "2h ago" — always the same width
-      my $size_w   = 6;   # "1.2MB" — history file size
-      my $id_w     = 36;  # UUID — always 36 chars
-      my $tag_w    = 5;   # adapter tag: ✶ Cld / a Aid / ☁ Cdx
-      my $prefix_w = 2;   # sel_mark (*) + running_bullet (●)
-      my $sep_w    = 2;   # spaces between columns
-      my $has_sb   = $n > $visible ? 1 : 0;
-      my $usable   = $COLS - $has_sb;
-  
-      # Dynamic path width: measure actual content, cap at 40, min 20
-      # Hidden in grouped mode since the directory is shown as a header row
-      my $path_w = 0;
-      unless ($grouped) {
-          my $max_path = 0;
-          for my $e (@$entries) {
-              next unless $e->{type} eq 'session';
-              my $len = length($e->{session}{cwd});
-              $max_path = $len if $len > $max_path;
-          }
-          $path_w = $max_path > 40 ? 40 : $max_path < 20 ? 20 : $max_path;
-      }
-  
-      # Title fills whatever space remains
-      my $fixed   = $prefix_w + 1 + $tag_w + $sep_w + $rel_w + $sep_w + $size_w + $sep_w + $id_w + $sep_w
-                  + ($path_w ? $path_w + $sep_w : 0);
-      my $title_w = $usable - $fixed;
-      $title_w = 10 if $title_w < 10;
-  
-      # Build the entire frame as a single string to avoid flicker.
-      # We overwrite in place with \033[H (go to top) rather than clearing first.
-      my $frame = "\033[H";
-  
-      # Title banner
-      $frame .= $banner;
-  
-      # Precompute scrollbar chars (drawn via cursor positioning after rows)
-      my @sb_char;
-      if ($has_sb) {
-          my $bar_height = int($visible * $visible / $n) || 1;
-          my $bar_top    = int($offset  * $visible / $n);
-          for my $r (0 .. $visible - 1) {
-              $sb_char[$r] = ($r >= $bar_top && $r < $bar_top + $bar_height) ? '#' : '|';
-          }
-      }
-  
-      # Column header row — mark the active sort column with ↑/↓
-      my $hdr_col = sub {
-          my ($key, $label, $w) = @_;
-          my $l = $sort_col eq $key ? colored("$label$sort_arrow", 'bold yellow') : $label;
-          return sprintf "%-${w}s", $l;
-      };
-      my $sel_mark_hdr = $sort_col eq 'selected' ? colored('*',        'bold yellow') : '*';
-      my $run_mark_hdr = $sort_col eq 'running'  ? colored("\x{25cf}", 'bold yellow') : "\x{25cf}";
-      my $hdr = $grouped
-          ? sprintf("%s%s %s  %s  %s  %s  %s",
-              $sel_mark_hdr, $run_mark_hdr,
-              $hdr_col->('agent',   'Agt',     $tag_w),
-              $hdr_col->('date',    'When',    $rel_w),
-              $hdr_col->('size',    'Size',    $size_w),
-              $hdr_col->('session', 'Session', $id_w),
-              $hdr_col->('title',   'Title',   $title_w))
-          : sprintf("%s%s %s  %s  %s  %s  %s  %s",
-              $sel_mark_hdr, $run_mark_hdr,
-              $hdr_col->('agent',   'Agt',     $tag_w),
-              $hdr_col->('date',    'When',    $rel_w),
-              $hdr_col->('size',    'Size',    $size_w),
-              $hdr_col->('session', 'Session', $id_w),
-              $hdr_col->('path',    'Path',    $path_w),
-              $hdr_col->('title',   'Title',   $title_w));
-      $frame .= _str_bold($hdr) . "\n";
-      $frame .= _str_dim('-' x ($usable - 1)) . "\n";
-  
-      # Visible session rows
-      my $end = $offset + $visible - 1;
-      $end = $n - 1 if $end >= $n;
-  
-      for my $i ($offset .. $end) {
-          my $entry     = $entries->[$i];
-          my $active    = $i == $cursor;
-          my $row_idx   = $i - $offset;        # 0-based index within visible area
-          my $sb        = $sb_char[$row_idx] // '';  # scrollbar char for this row
-  
-          # Group header row — just a directory path label
-          if ($entry->{type} eq 'header') {
-              my $line = sprintf " %-*s", $usable - 2, $entry->{label};
-              $frame .= ($active
-                  ? color('reverse') . _str_boldyel($line) . RESET
-                  : _str_boldyel($line)) . "\n";
-              next;
-          }
-  
-          my $session    = $entry->{session};
-          my $is_sel     = $sel_ids->{ $session->{id} };
-          my $is_running = $running->{  $session->{id} };
-  
-          my $sel_mark       = $is_sel     ? '*'        : ' ';
-          my $running_bullet = $is_running ? "\x{25cf}" : ' ';
-  
-          # Field values padded to their column width
-          my $tag   = _adapter_tag($session->{_adapter}, $active || $is_sel);
-          my $when  = sprintf "%-${rel_w}s",   _rel_time($session->{epoch});
-          my $size  = sprintf "%-${size_w}s",  _fmt_size($session->{_size} // 0);
-          my $id    = sprintf "%-${id_w}s",    $session->{id};
-          my $raw_title = substr($session->{title}, 0, $title_w);
-          my $raw_path  = $grouped ? '' : _truncate_path($session->{cwd}, $path_w);
-  
-          # Highlight matching substrings in title and path (not ID) when filtering
-          if ($filter && !$active) {
-              my $re = eval { qr/(\Q$filter\E)/i } // qr/(?!)/;
-              $raw_title =~ s/$re/colored($1, 'bold reverse')/ge;
-              $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $grouped;
-          }
-  
-          my $title    = sprintf "%-${title_w}s", $raw_title;
-          my $path_sep = $grouped ? '' : $raw_path . '  ';
-  
-          my $row;
-          if ($active) {
-              $row = _col_active . $sel_mark
-                   . ($is_running ? _col_boldgrn . $running_bullet . _col_active : ' ')
-                   . " $tag  $when  $size  $id  $path_sep$title"
-                   . RESET;
-          } elsif ($is_sel) {
-              $row = _col_sel . $sel_mark
-                   . ($is_running ? _col_boldgrn . $running_bullet . _col_sel : ' ')
-                   . " $tag  $when  $size  $id  $path_sep$title"
-                   . RESET;
-          } else {
-              my $path_part = $grouped ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . '  ';
-              $row = $sel_mark
-                   . ($is_running ? _col_boldgrn . $running_bullet : ' ')
-                   . ' ' . $tag . RESET . '  '
-                   . _col_yellow . $when . '  '
-                   . _col_cyan   . $size . '  '
-                   . _col_cyan   . $id   . '  '
-                   . $path_part
-                   . _col_white  . $title
-                   . RESET;
-          }
-  
-          $frame .= $row . "\n";
-      }
-  
-      # Pad with blank lines up to the visible area height so old content is overwritten.
-      # Each padding line gets \033[K to erase any leftover characters.
-      my $rows_drawn = ($end >= $offset) ? ($end - $offset + 1) : 0;
-      $frame .= "\033[K\n" x ($visible - $rows_drawn) if $rows_drawn < $visible;
-  
-      # Draw scrollbar via absolute cursor positioning (avoids ANSI-width miscalculation)
-      # Rows start at line: banner(1) + header(1) + sep(1) = line 4
-      if ($has_sb) {
-          my $sb_col = $COLS;  # rightmost column
-          for my $r (0 .. $visible - 1) {
-              my $screen_row = $banner_lines + 2 + 1 + $r;  # 1-based
-              $frame .= "\033[${screen_row};${sb_col}H"
-                     . _str_dim($sb_char[$r] // '|');
-          }
-      }
-  
-      # Footer on the last line — no cursor jump needed, we've written exactly
-      # banner(3) + header(1) + sep(1) + visible rows = $ROWS - 1 lines above it.
-      my $nsel        = scalar keys %$sel_ids;
-      my $toggle_mode = $grouped ? 'flat' : 'grouped';  # what [t] will switch TO
-      my $pct         = $n > $visible ? sprintf(' %d%%', int(($offset + $visible/2) / $n * 100)) : '';
-      my $footer = sprintf(
-          '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] →%s  [s]ort:%s  [r]efresh  [/] filter  [?] search  [a/A]  [q]uit   %d sel/%d%s%s',
-          $toggle_mode, $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct,
-          ($filter   ? colored("  /filter: $filter",     'bold cyan')   : '')
-        . ($fulltext ? colored("  ?search: $fulltext",   'bold yellow') : ''));
-      $frame .= colored(substr($footer . ' ' x $cols, 0, $cols - 1), 'white on_blue');
-  
-      # Single write — eliminates flicker from partial screen updates
-      print $frame;
-      STDOUT->flush();
-  }
-  
-  # ── Sort popup ───────────────────────────────────────────────────────────────
-  # Shows a small centered popup to pick a sort column.
-  # Returns the chosen index into @sort_cols, or undef if cancelled.
-  
-  sub _sort_popup {
-      my ($sort_cols, $current_idx, $reverse) = @_;
-  
-      my @labels = (
-          'selected  (*)',
-          'running   (●)',
-          'agent',
-          'date',
-          'size',
-          'session',
-          'path',
-          'title',
-      );
-  
-      my $pick   = $current_idx;
-      my $dir    = $reverse ? "\x{2193} descending" : "\x{2191} ascending";
-      my $footer_text = ' [↑↓] move  [ENTER] ok  [ESC] cancel ';
-      my $title_text  = " Sort $dir ";
-  
-      # Width fits the widest of: title, footer, labels (with 2-char padding)
-      my $max_label = (sort { $b <=> $a } map { length } @labels)[0];
-      my $w = (sort { $b <=> $a } length($title_text), length($footer_text), $max_label + 4)[0];
-  
-      while (1) {
-          ($ROWS, $COLS) = _term_size();
-  
-          my $h    = scalar(@labels) + 4;
-          my $top  = int(($ROWS - $h) / 2);
-          my $left = int(($COLS - $w) / 2);
-  
-          my $popup = '';
-          my $pad   = int(($w - length($title_text)) / 2);
-          $popup .= "\033[${top};${left}H" . colored(' ' x $w, 'white on_blue');
-          $popup .= "\033[" . ($top+1) . ";${left}H"
-                 . colored(' ' x $pad . $title_text . ' ' x ($w - $pad - length($title_text)), 'bold white on_blue');
-          $popup .= "\033[" . ($top+2) . ";${left}H" . colored(' ' x $w, 'white on_blue');
-  
-          for my $i (0 .. $#labels) {
-              my $row   = $top + 3 + $i;
-              my $label = sprintf " %-*s ", $w - 2, $labels[$i];
-              $popup .= "\033[${row};${left}H";
-              $popup .= $i == $pick
-                  ? colored($label, 'black on_cyan')
-                  : colored($label, 'white on_blue');
-          }
-  
-          my $footer_row = $top + 3 + scalar @labels;
-          my $footer = sprintf "%-*s", $w, $footer_text;
-          $popup .= "\033[${footer_row};${left}H" . colored($footer, 'faint on_blue');
-  
-          print $popup;
-          STDOUT->flush();
-  
-          my $key = _read_key();
-          if    ($key eq 'UP'   || $key eq 'k') { $pick = ($pick - 1 + @labels) % @labels }
-          elsif ($key eq 'DOWN' || $key eq 'j') { $pick = ($pick + 1)           % @labels }
-          elsif ($key eq "\n"   || $key eq "\r") { return $pick }
-          elsif ($key eq 'ESC'  || $key eq 'q')  { return undef }
-      }
-  }
-  
-  sub _confirm {
-      my ($prompt) = @_;
-      print "\033[2J\033[H$prompt";
-      my $ans = '';
-      sysread STDIN, $ans, 1;
-      return $ans;
-  }
-  
-  # ── Peek / conversation view ──────────────────────────────────────────────────
-  # Shows the full conversation history for a session in a scrollable view.
-  # Messages are word-wrapped to fit the terminal width.
-  
-  sub _peek {
-      my ($session) = @_;
-      my @msgs = $session->{_adapter}->load_messages($session);
-      my ($rows, $cols) = _term_size();
-      my $wrap = $cols - 9;  # leave room for the "  You: " / "   AI: " prefix
-      $wrap = 40 if $wrap < 40;
-  
-      # Build the list of display lines up front (pre-wrapped)
-      my @lines;
-      push @lines, { text => _str_bold('Session: ') . $session->{title} };
-      push @lines, { text => _str_bold('Path:    ') . _str_boldgrn($session->{cwd}) };
-      push @lines, { text => _str_bold('ID:      ') . _str_boldcyn($session->{id}) };
-      push @lines, { text => _str_dim('-' x ($cols - 2)) };
-  
-      for my $msg (@msgs) {
-          my $is_user = $msg->{role} eq 'user';
-          my $prefix  = $is_user ? _str_boldcyn('  You: ') : _str_boldyel('   AI: ');
-          my $indent  = ' ' x 7;  # align continuation lines with text after prefix
-          my $first   = 1;
-  
-          (my $text = $msg->{text}) =~ s/\r//g;
-          for my $line (split /\n/, $text) {
-              $line ||= ' ';
-  
-              # Word-wrap long lines
-              while (length($line) > $wrap) {
-                  my $chunk = substr($line, 0, $wrap);
-                  $chunk =~ s/\s+\S+$// or substr($line, 0, $wrap) = '';
-                  substr($line, 0, length($chunk) + ($chunk ne substr($line,0,length($chunk)) ? 1 : 0)) = '';
-                  push @lines, { text => ($first ? $prefix : $indent) . $chunk };
-                  $first = 0;
-              }
-              push @lines, { text => ($first ? $prefix : $indent) . $line };
-              $first = 0;
-          }
-          push @lines, { text => '' };  # blank line between messages
-      }
-  
-      my $n      = scalar @lines;
-      my $vis    = $rows - 2;
-      my $offset = $n > $vis ? $n - $vis : 0;  # start scrolled to the bottom
-  
-      _init_term();
-      print "\033[?25l";
-  
-      while (1) {
-          ($rows, $cols) = _term_size();
-          $vis = $rows - 2;
-          $offset = 0          if $offset < 0;
-          $offset = $n - $vis  if $n > $vis && $offset > $n - $vis;
-  
-          print "\033[H\033[J";
-          my $end = $offset + $vis - 1;
-          $end = $n - 1 if $end >= $n;
-          print $lines[$_]{text} . "\n" for $offset .. $end;
-  
-          # Scrollbar
-          if ($n > $vis) {
-              my $bar_h   = int($vis * $vis / $n) || 1;
-              my $bar_top = int($offset * $vis / $n);
-              for my $r (0 .. $vis - 1) {
-                  my $ch = ($r >= $bar_top && $r < $bar_top + $bar_h) ? '█' : '│';
-                  print "\033[" . ($r + 1) . ";${cols}H$ch";
-              }
-          }
-  
-          print "\033[${rows};1H";
-          print colored(
-              substr('[↑↓/jk] scroll  [PgUp/Dn] page  [g/G] top/bot  [q/ESC] return' . ' ' x $cols, 0, $cols - 1),
-              'white on_blue');
-  
-          my $key = _read_key();
-          if    ($key eq 'UP'   || $key eq 'k') { $offset-- }
-          elsif ($key eq 'DOWN' || $key eq 'j') { $offset++ }
-          elsif ($key eq 'PGUP')                { $offset -= $vis }
-          elsif ($key eq 'PGDN')                { $offset += $vis }
-          elsif ($key eq 'HOME' || $key eq 'g') { $offset = 0 }
-          elsif ($key eq 'END'  || $key eq 'G') { $offset = $n - $vis }
-          elsif ($key eq 'q' || $key eq 'ESC')  { last }
-      }
-  
-      _restore_term();
-      print "\033[?25h";
-  }
-  
-  # ── Delete and move ───────────────────────────────────────────────────────────
-  
-  sub _do_delete {
-      my ($chosen, $sessions, $sel_ids) = @_;
-      print "\033[2J\033[H";
-      print _str_boldred('Delete ' . scalar(@$chosen) . " session(s)?\n\n");
-      for my $s (@$chosen) {
-          printf "  %s\n",  _str_bold($s->{title});
-          printf "  %s  %s\n", _str_boldgrn($s->{cwd}), _str_dim($s->{date});
-          printf "  %s\n",  _str_dim($s->{_file} // '');
-          print "\n";
-      }
-      print _str_boldred('[y] Delete  [n] Cancel: ');
-  
-      # Read a single keypress — stay in raw mode
-      my $ans = '';
-      sysread STDIN, $ans, 1;
-      print "\n";
-  
-      if (lc($ans) eq 'y') {
-          my %deleted_ids;
-          for my $session (@$chosen) {
-              $session->{_adapter}->delete_session($session);
-              delete $sel_ids->{ $session->{id} };
-              $deleted_ids{ $session->{id} } = 1;
-          }
-          @$sessions = grep { !$deleted_ids{$_->{id}} } @$sessions;
-      }
-  }
-  
-  sub _do_move {
-      my ($chosen, $sessions, $sel_ids) = @_;
-      print "\033[2J\033[H";
-      print "Move " . scalar(@$chosen) . " session(s)\n";
-      print "Current: " . _str_boldgrn($chosen->[0]{cwd}) . "\n\nNew directory: ";
-      _restore_term();
-      my $new_cwd = <STDIN>;
-      return unless defined $new_cwd;
-      chomp $new_cwd;
-      $new_cwd =~ s|/$||;  # strip trailing slash
-      unless ($new_cwd && -d $new_cwd) {
-          print _str_boldred("Directory does not exist: $new_cwd\n");
-          print "Press Enter..."; <STDIN>;
-          return;
-      }
-      for my $session (@$chosen) {
-          my ($ok, $err) = $session->{_adapter}->move_session($session, $new_cwd);
-          print $ok ? _str_boldgrn("Moved $session->{id}\n") : _str_boldred("Error: $err\n");
-      }
-      print "Press Enter..."; <STDIN>;
-  }
-  
-  # ── Utilities ─────────────────────────────────────────────────────────────────
-  
-  sub _adapter_tag {
-      my ($adapter, $active_or_sel) = @_;
-      my $label = $adapter->can('tag')       ? $adapter->tag       : substr(ref($adapter) =~ s/.*:://r, 0, 5);
-      my $col   = $adapter->can('tag_color') ? $adapter->tag_color : undef;
-      return ($col && !$active_or_sel) ? colored($label, $col) : $label;
-  }
-  
-  # Returns a human-readable relative time string, e.g. "2h ago", "3d ago"
-  sub _fmt_size {
-      my ($bytes) = @_;
-      return '0B'                          unless $bytes;
-      return "${bytes}B"                   if $bytes < 1024;
-      return sprintf('%.0fK', $bytes/1024) if $bytes < 1024*1024;
-      return sprintf('%.1fM', $bytes/1024/1024);
-  }
-  
-  sub _rel_time {
-      my ($epoch) = @_;
-      return 'unknown' unless $epoch;
-      my $diff = time() - $epoch;
-      return 'just now'                    if $diff < 60;
-      return int($diff/60)       . 'm ago' if $diff < 3600;
-      return int($diff/3600)     . 'h ago' if $diff < 86400;
-      return int($diff/86400)    . 'd ago' if $diff < 86400 * 30;
-      return int($diff/86400/30) . 'mo ago' if $diff < 86400 * 365;
-      return int($diff/86400/365). 'y ago';
-  }
-  
-  1;
-SAISONS_UI
-
 s/^  //mg for values %fatpacked;
 
 my $class = 'FatPacked::'.(0+\%fatpacked);
@@ -3085,15 +3085,15 @@ binmode STDERR, ':utf8';
 use lib "$ENV{HOME}/.local/lib";
 use lib 'lib';
 use Module::Pluggable (
-    search_path => 'Saisons::Adapter',
+    search_path => 'App::Saisons::Adapter',
     require     => 1,
     inner       => 0,
 );
-use Saisons;
-use Saisons::UI;
+use App::Saisons;
+use App::Saisons::UI;
 
 if (@ARGV && $ARGV[0] eq '--version') {
-    print "saisons $Saisons::VERSION\n";
+    print "saisons $App::Saisons::VERSION\n";
     exit 0;
 }
 
@@ -3129,7 +3129,7 @@ my $launcher = $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
 
 # ── UI loop — keep running until user quits ───────────────────────────────────
 
-my $ui = Saisons::UI->new;
+my $ui = App::Saisons::UI->new;
 
 while (1) {
     # Refresh running sessions each iteration

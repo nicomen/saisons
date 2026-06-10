@@ -3,10 +3,10 @@
 Create `lib/Saisons/Adapter/YourAgent.pm` implementing these six methods:
 
 ```perl
-package Saisons::Adapter::YourAgent;
+package App::Saisons::Adapter::YourAgent;
 use strict;
 use warnings;
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 sub new       { bless {}, shift }
 sub name      { 'Your Agent' }   # display name shown in UI
@@ -35,13 +35,13 @@ sub running {
 }
 
 # Open the given sessions ($sessions is an arrayref of hashrefs).
-# Use Saisons::Launcher::launch_cmd() to handle all launchers automatically:
+# Use App::Saisons::Launcher::launch_cmd() to handle all launchers automatically:
 #   tmux, screen, gnome-terminal, iterm, terminal-app, inline
 sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
         my $cmd = "cd \Q$s->{cwd}\E && youragent --resume \Q$s->{id}\E";
-        Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+        App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
 
@@ -62,7 +62,7 @@ sub load_messages {
 ```
 
 That's it — `saisons` uses `Module::Pluggable` to auto-discover all
-`Saisons::Adapter::*` modules under `lib/`, so no registration is needed.
+`App::Saisons::Adapter::*` modules under `lib/`, so no registration is needed.
 Just drop the file in place.
 
 The `tag` and `tag_color` methods control how the adapter appears in the `Agt`

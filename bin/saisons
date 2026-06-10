@@ -8,15 +8,15 @@ binmode STDERR, ':utf8';
 use lib "$ENV{HOME}/.local/lib";
 use lib 'lib';
 use Module::Pluggable (
-    search_path => 'Saisons::Adapter',
+    search_path => 'App::Saisons::Adapter',
     require     => 1,
     inner       => 0,
 );
-use Saisons;
-use Saisons::UI;
+use App::Saisons;
+use App::Saisons::UI;
 
 if (@ARGV && $ARGV[0] eq '--version') {
-    print "saisons $Saisons::VERSION\n";
+    print "saisons $App::Saisons::VERSION\n";
     exit 0;
 }
 
@@ -52,7 +52,7 @@ my $launcher = $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
 
 # ── UI loop — keep running until user quits ───────────────────────────────────
 
-my $ui = Saisons::UI->new;
+my $ui = App::Saisons::UI->new;
 
 while (1) {
     # Refresh running sessions each iteration

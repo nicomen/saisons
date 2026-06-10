@@ -1,9 +1,9 @@
-package Saisons::Adapter::Codex;
+package App::Saisons::Adapter::Codex;
 use strict;
 use warnings;
 use JSON::PP ();
 use POSIX qw();
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 # Codex CLI stores sessions under ~/.codex/sessions/YYYY/MM/DD/
 # Each file is named: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
@@ -41,7 +41,7 @@ sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
         my $cmd = "cd \Q$s->{cwd}\E && codex resume \Q$s->{_file}\E";
-        Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+        App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
 

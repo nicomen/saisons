@@ -1,4 +1,4 @@
-package Saisons::Launcher;
+package App::Saisons::Launcher;
 use strict;
 use warnings;
 

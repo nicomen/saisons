@@ -1,4 +1,4 @@
-package Saisons::UI;
+package App::Saisons::UI;
 use strict;
 use warnings;
 use utf8;
@@ -492,7 +492,7 @@ sub _banner {
     my @colors  = ('bold red', 'bold yellow', 'bold green', 'bold cyan', 'bold blue', 'bold magenta', 'bold red');
     my $title   = join '', map { colored($letters[$_], $colors[$_]) } 0..$#letters;
 
-    my $author      = "v$Saisons::VERSION  by Nicolas Mendoza  \x{00a9} 2026";
+    my $author      = "v$App::Saisons::VERSION  by Nicolas Mendoza  \x{00a9} 2026";
     my $title_vis   = scalar @letters * 2;  # fullwidth chars are 2 columns wide
     my $pad         = $cols - $title_vis - length($author);
     $pad = 2 if $pad < 2;

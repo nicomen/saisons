@@ -1,9 +1,9 @@
-package Saisons::Adapter::Opencode;
+package App::Saisons::Adapter::Opencode;
 use strict;
 use warnings;
 use JSON::PP ();
 use POSIX qw();
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 # opencode stores sessions under $XDG_DATA_HOME/opencode/storage/session/<projectID>/
 # Each session is a directory containing message JSON files.
@@ -50,7 +50,7 @@ sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
         my $cmd = "cd \Q$s->{cwd}\E && opencode --session \Q$s->{id}\E";
-        Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+        App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
 

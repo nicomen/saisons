@@ -3,9 +3,9 @@ use warnings;
 use ExtUtils::MakeMaker;
 
 WriteMakefile(
-    NAME             => 'Saisons',
+    NAME             => 'App::Saisons',
     AUTHOR           => 'Nicolas Mendoza <mendoza@pvv.ntnu.no>',
-    VERSION_FROM     => 'lib/Saisons.pm',
+    VERSION_FROM     => 'lib/App/Saisons.pm',
     ABSTRACT         => 'Terminal UI for browsing and resuming AI coding agent sessions',
     LICENSE          => 'artistic_2',
     MIN_PERL_VERSION => '5.010',

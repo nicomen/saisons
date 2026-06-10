@@ -1,9 +1,9 @@
-package Saisons::Adapter::Claude;
+package App::Saisons::Adapter::Claude;
 use strict;
 use warnings;
 use JSON::PP;
 use POSIX qw();
-use Saisons::Launcher ();
+use App::Saisons::Launcher ();
 
 # An adapter must implement:
 #   name()          -> display name string
@@ -98,7 +98,7 @@ sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
         my $cmd = "cd \Q$s->{cwd}\E && claude --resume \Q$s->{id}\E";
-        Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
+        App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
 
