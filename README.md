@@ -63,8 +63,6 @@ make fatpack
 
 ### macOS
 
-Perl is pre-installed on macOS. The curl method works as-is:
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o ~/.local/bin/saisons
 chmod +x ~/.local/bin/saisons
@@ -75,8 +73,6 @@ Or via the installer:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
 ```
-
-Sessions open in iTerm2 (if running inside it) or Terminal.app automatically.
 
 ### Windows
 
@@ -141,11 +137,11 @@ Aider history files are searched one level deep under `~/projects`, `~/dev`, `~/
 
 ## Adding support for other agents
 
-See [`lib/Saisons/Adapter/HOWTO.md`](lib/Saisons/Adapter/HOWTO.md) for a copy-paste template. In short:
+See [`lib/App/Saisons/Adapter/HOWTO.md`](lib/App/Saisons/Adapter/HOWTO.md) for a copy-paste template. In short:
 
-1. Create `lib/Saisons/Adapter/MyAgent.pm` implementing six methods: `name`, `find_sessions`, `running`, `launch`, `delete_session`, `load_messages`
+1. Create `lib/App/Saisons/Adapter/MyAgent.pm` implementing six methods: `name`, `find_sessions`, `running`, `launch`, `delete_session`, `load_messages`
 2. Add it to the `@adapters` list in `saisons`
-3. Optionally add a brand color entry to `%ADAPTER_TAGS` in `lib/Saisons/UI.pm`
+3. Optionally add a brand color entry to `%ADAPTER_TAGS` in `lib/App/Saisons/UI.pm`
 
 ## Session state
 
