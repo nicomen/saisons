@@ -33,8 +33,8 @@ sub session_ok {
 # ── Claude ────────────────────────────────────────────────────────────────────
 
 {
-    require Saisons::Adapter::Claude;
-    my $adapter = Saisons::Adapter::Claude->new;
+    require App::Saisons::Adapter::Claude;
+    my $adapter = App::Saisons::Adapter::Claude->new;
     adapter_ok($adapter);
 
     local $ENV{HOME} = "$fixtures/claude";
@@ -58,8 +58,8 @@ sub session_ok {
 # ── Codex ─────────────────────────────────────────────────────────────────────
 
 {
-    require Saisons::Adapter::Codex;
-    my $adapter = Saisons::Adapter::Codex->new;
+    require App::Saisons::Adapter::Codex;
+    my $adapter = App::Saisons::Adapter::Codex->new;
     adapter_ok($adapter);
 
     local $ENV{CODEX_HOME} = "$fixtures/codex";
@@ -83,8 +83,8 @@ sub session_ok {
 # ── Aider ─────────────────────────────────────────────────────────────────────
 
 {
-    require Saisons::Adapter::Aider;
-    my $adapter = Saisons::Adapter::Aider->new;
+    require App::Saisons::Adapter::Aider;
+    my $adapter = App::Saisons::Adapter::Aider->new;
     adapter_ok($adapter);
 
     local $ENV{SAISONS_SEARCH_DIRS} = "$fixtures/aider";
@@ -108,8 +108,8 @@ sub session_ok {
 # ── Gemini ────────────────────────────────────────────────────────────────────
 
 {
-    require Saisons::Adapter::Gemini;
-    my $adapter = Saisons::Adapter::Gemini->new;
+    require App::Saisons::Adapter::Gemini;
+    my $adapter = App::Saisons::Adapter::Gemini->new;
     adapter_ok($adapter);
 
     local $ENV{HOME} = "$fixtures/gemini";
@@ -133,8 +133,8 @@ sub session_ok {
 # ── opencode ──────────────────────────────────────────────────────────────────
 
 {
-    require Saisons::Adapter::Opencode;
-    my $adapter = Saisons::Adapter::Opencode->new;
+    require App::Saisons::Adapter::Opencode;
+    my $adapter = App::Saisons::Adapter::Opencode->new;
     adapter_ok($adapter);
 
     local $ENV{HOME}         = "$fixtures/opencode";

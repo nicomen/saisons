@@ -26,23 +26,25 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 
 Requires Perl 5.10+.
 
-### cpanm (recommended)
+### curl (quickest)
+
+Downloads the self-contained fatpacked script — no lib setup needed:
 
 ```sh
-cpanm https://github.com/nicomen/saisons/archive/main.tar.gz
+curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o ~/.local/bin/saisons
+chmod +x ~/.local/bin/saisons
 ```
 
-### curl (single file, no dependencies)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o saisons
-chmod +x saisons
-```
-
-### curl installer
+Or use the installer which handles PATH setup automatically:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
+```
+
+### cpanm
+
+```sh
+cpanm https://github.com/nicomen/saisons/archive/main.tar.gz
 ```
 
 ### From source
@@ -50,11 +52,31 @@ curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | s
 ```sh
 git clone https://github.com/nicomen/saisons.git
 cd saisons
-perl Makefile.PL
-make
-make test
-make install
+perl Makefile.PL && make && make test && make install
 ```
+
+To rebuild the fatpacked `saisons` script after editing sources:
+
+```sh
+make fatpack
+```
+
+### macOS
+
+Perl is pre-installed on macOS. The curl method works as-is:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o /usr/local/bin/saisons
+chmod +x /usr/local/bin/saisons
+```
+
+Or via the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
+```
+
+Sessions open in iTerm2 (if running inside it) or Terminal.app automatically.
 
 ### Windows
 

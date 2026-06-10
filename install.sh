@@ -1,9 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
-REPO_URL="https://github.com/nicomen/saisons.git"
+SCRIPT_URL="https://raw.githubusercontent.com/nicomen/saisons/main/saisons"
 INSTALL_DIR=""
-LIB_DIR="$HOME/.local/lib"
 
 # Find a writable directory in PATH
 for dir in "$HOME/.local/bin" "$HOME/bin" /usr/local/bin; do
@@ -34,29 +33,10 @@ if ! command -v perl >/dev/null 2>&1; then
     exit 1
 fi
 
-# Check for git
-if ! command -v git >/dev/null 2>&1; then
-    echo "Error: git is not installed."
-    exit 1
-fi
-
-REPO_DIR="$HOME/.local/share/saisons"
-
-# Clone or update repo
-if [ -d "$REPO_DIR/.git" ]; then
-    echo "Updating saisons..."
-    git -C "$REPO_DIR" pull --ff-only
-else
-    echo "Installing saisons..."
-    git clone --depth=1 "$REPO_URL" "$REPO_DIR"
-fi
-
-# Symlink the executable
-ln -sf "$REPO_DIR/saisons" "$INSTALL_DIR/saisons"
-
-# Symlink the lib
-mkdir -p "$LIB_DIR"
-ln -sf "$REPO_DIR/lib/Saisons"    "$LIB_DIR/Saisons"
-ln -sf "$REPO_DIR/lib/Saisons.pm" "$LIB_DIR/Saisons.pm"
+# Download the fatpacked script
+DEST="$INSTALL_DIR/saisons"
+echo "Installing saisons to $DEST ..."
+curl -fsSL "$SCRIPT_URL" -o "$DEST"
+chmod +x "$DEST"
 
 echo "Done. Run: saisons"
