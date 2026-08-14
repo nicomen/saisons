@@ -2,6 +2,8 @@ use strict;
 use warnings;
 use Test::More;
 use File::Spec;
+use File::Temp qw(tempdir);
+use File::Copy::Recursive qw(dircopy);
 use lib 'lib';
 
 my $fixtures = File::Spec->catdir('t', 'fixtures');
@@ -39,9 +41,9 @@ sub session_ok {
 
     local $ENV{HOME} = "$fixtures/claude";
     my @sessions = $adapter->find_sessions;
-    ok(@sessions == 1, 'Claude: found 1 session');
+    ok(@sessions == 2, 'Claude: found 2 sessions');
 
-    my $s = $sessions[0];
+    my ($s) = grep { $_->{id} eq 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } @sessions;
     session_ok($s, 'Claude session');
     is($s->{id},    'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'Claude: correct id');
     is($s->{title}, 'Fix the login bug',                    'Claude: aiTitle used as title');
@@ -53,6 +55,51 @@ sub session_ok {
     is($msgs[0]{role}, 'user',       'Claude: first message is user');
     is($msgs[1]{role}, 'assistant',  'Claude: second message is assistant');
     like($msgs[0]{text}, qr/login/,  'Claude: user message text');
+}
+
+# ── Claude: _derive_path ─────────────────────────────────────────────────────
+
+{
+    # _derive_path is called when a session file has no "cwd" field.
+    # It must not convert dashes within directory names to slashes.
+    no warnings 'once';
+    my $fn = \&App::Saisons::Adapter::Claude::_derive_path;
+    # When cwd is absent, return the raw project dir name as fallback.
+    # We cannot reliably reverse the encoding (dashes-as-separators vs dashes
+    # in directory names are ambiguous), so don't try.
+    is($fn->('-projects-claude-perl'),  '-projects-claude-perl',  '_derive_path: returns raw dir name (no mangling)');
+    is($fn->('-projects-saisons'),      '-projects-saisons',      '_derive_path: returns raw dir name');
+    isnt($fn->('-projects-claude-perl'), '/projects/claude/perl', '_derive_path: does NOT split on dashes');
+}
+
+# ── Claude: move_session ──────────────────────────────────────────────────────
+
+{
+    require App::Saisons::Adapter::Claude;
+    my $adapter = App::Saisons::Adapter::Claude->new;
+
+    my $tmp = tempdir(CLEANUP => 1);
+    dircopy("$fixtures/claude/.claude", "$tmp/.claude");
+
+    local $ENV{HOME} = $tmp;
+    my @sessions = $adapter->find_sessions;
+    my ($s) = grep { $_->{id} eq 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } @sessions;
+
+    my $old_file = $s->{_file};
+    my $new_cwd  = '/home/user/newproject';
+    mkdir "$tmp/.claude/projects/-home-user-newproject";
+
+    my ($ok, $err) = $adapter->move_session($s, $new_cwd);
+    ok($ok,           'Claude move_session: succeeded');
+    ok(!-f $old_file, 'Claude move_session: old file removed');
+    ok(-f $s->{_file},'Claude move_session: new file exists');
+    is($s->{cwd}, $new_cwd, 'Claude move_session: cwd updated in session');
+
+    open my $fh, '<', $s->{_file} or die;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    like($content,   qr|"cwd":"$new_cwd"|, 'Claude move_session: cwd rewritten in file');
+    unlike($content, qr|"cwd":"/home/user/myproject"|, 'Claude move_session: old cwd not present');
 }
 
 # ── Codex ─────────────────────────────────────────────────────────────────────

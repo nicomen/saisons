@@ -4,27 +4,13 @@ use warnings;
 use JSON::PP;
 use POSIX qw();
 use App::Saisons::Launcher ();
-
-# An adapter must implement:
-#   name()          -> display name string
-#   find_sessions() -> list of session hashrefs
-#   running()       -> hashref { session_id => 1 }
-#   launch($sessions_aref, $launcher) -> opens sessions
-#   delete_session($session) -> removes session file
-#   load_messages($session) -> list of { role, text }
-
 sub new { bless {}, shift }
-
 sub name      { 'Claude Code' }
 sub tag       { "\x{2736} Cld" }
 sub tag_color { 'bold red' }
-
 sub find_sessions {
     my ($self) = @_;
     my $projects_dir = "$ENV{HOME}/.claude/projects";
-
-    # Build a lookup of session ID -> name from running session files.
-    # Used as fallback title for sessions that haven't ended yet (no aiTitle).
     my %running_names;
     my $sessions_dir = "$ENV{HOME}/.claude/sessions";
     if (opendir my $sdh, $sessions_dir) {
@@ -39,9 +25,7 @@ sub find_sessions {
         }
         closedir $sdh;
     }
-
     my @sessions;
-
     opendir my $dh, $projects_dir or return @sessions;
     for my $project (sort readdir $dh) {
         next if $project =~ /^\./;
@@ -53,9 +37,9 @@ sub find_sessions {
             my $id = $1;
             my ($title, $date, $epoch, $cwd, $first_msg) = _extract_meta("$dir/$file");
             $cwd //= _derive_path($project);
-            # title priority: aiTitle → running session name → first user message → default
             $title //= $running_names{$id} // $first_msg // '(no title)';
             my $size = -s "$dir/$file" // 0;
+            my $session_dir = "$dir/$id";
             push @sessions, {
                 id       => $id,
                 project  => $project,
@@ -64,6 +48,7 @@ sub find_sessions {
                 date     => $date,
                 epoch    => $epoch,
                 _file    => "$dir/$file",
+                _dir     => (-d $session_dir ? $session_dir : undef),
                 _size    => $size,
                 _adapter => $self,
             };
@@ -73,7 +58,6 @@ sub find_sessions {
     closedir $dh;
     return @sessions;
 }
-
 sub running {
     my ($self) = @_;
     my %running;
@@ -93,7 +77,6 @@ sub running {
     closedir $sdh;
     return %running;
 }
-
 sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
@@ -101,32 +84,23 @@ sub launch {
         App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
-
 sub delete_session {
     my ($self, $session) = @_;
     return unlink $session->{_file};
 }
-
 sub move_session {
     my ($self, $session, $new_cwd) = @_;
     my $projects_dir = "$ENV{HOME}/.claude/projects";
     my $old_cwd      = $session->{cwd};
     my $old_file     = $session->{_file};
-
-    # Encode new cwd as project dir name (/ -> -)
     (my $new_project = $new_cwd) =~ s|/|-|g;
-    $new_project =~ s/^-//;  # strip leading -
+    $new_project =~ s/^-//;  
     $new_project = "-$new_project";
-
     my $new_dir  = "$projects_dir/$new_project";
     my $new_file = "$new_dir/$session->{id}.jsonl";
-
-    # Create target project dir if needed
     unless (-d $new_dir) {
         mkdir $new_dir or return (0, "Cannot create $new_dir: $!");
     }
-
-    # Rewrite cwd in every line of the jsonl and write to new location
     open my $in,  '<', $old_file or return (0, "Cannot read $old_file: $!");
     open my $out, '>', $new_file or return (0, "Cannot write $new_file: $!");
     my $old_quoted = quotemeta($old_cwd);
@@ -136,23 +110,17 @@ sub move_session {
     }
     close $in;
     close $out;
-
-    # Remove old file; remove old project dir if now empty
     unlink $old_file;
     my $old_dir = "$projects_dir/$session->{project}";
     opendir my $dh, $old_dir or return (1, '');
     my @remaining = grep { !/^\./ } readdir $dh;
     closedir $dh;
     rmdir $old_dir unless @remaining;
-
-    # Update session record in place
     $session->{cwd}     = $new_cwd;
     $session->{project} = $new_project;
     $session->{_file}   = $new_file;
-
     return (1, '');
 }
-
 sub load_messages {
     my ($self, $session) = @_;
     my @messages;
@@ -178,9 +146,6 @@ sub load_messages {
     close $fh;
     return @messages;
 }
-
-# ── private helpers ───────────────────────────────────────────────────────────
-
 sub _extract_meta {
     my ($file) = @_;
     my ($title, $date, $epoch, $cwd, $first_msg) = (undef, '0000-00-00', 0, undef, undef);
@@ -189,9 +154,6 @@ sub _extract_meta {
     while (<$fh>) {
         $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
         $cwd   = $1 if !$cwd && /"cwd":"([^"]+)"/;
-        # Capture first real user message as fallback title.
-        # Skip the context-continuation boilerplate Claude injects when a session
-        # hits the context limit.
         if (!$first_msg && /"role":"user"/) {
             my $obj = eval { decode_json($_) } or next;
             my $c   = $obj->{message}{content};
@@ -212,12 +174,10 @@ sub _extract_meta {
     print STDERR "\033[2K\r";
     return ($title, $date, $epoch, $cwd, $first_msg);
 }
-
 sub _derive_path {
     my ($project) = @_;
     (my $path = $project) =~ s/^-/\//;
     $path =~ s/-/\//g;
     return $path;
 }
-
 1;

@@ -30,14 +30,6 @@ my @adapters = map { $_->new }
 my @sessions;
 my %running;
 
-for my $adapter (@adapters) {
-    push @sessions, $adapter->find_sessions;
-    %running = (%running, $adapter->running);
-}
-
-@sessions = sort { $b->{date} cmp $a->{date} } @sessions;
-die "No sessions found.\n" unless @sessions;
-
 # ── detect launcher ───────────────────────────────────────────────────────────
 
 my $launcher = $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
@@ -55,11 +47,15 @@ my $launcher = $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
 my $ui = App::Saisons::UI->new;
 
 while (1) {
-    # Refresh running sessions each iteration
-    %running = ();
+    # Refresh sessions and running state each iteration
+    @sessions = ();
+    %running  = ();
     for my $adapter (@adapters) {
+        push @sessions, $adapter->find_sessions;
         %running = (%running, $adapter->running);
     }
+    @sessions = sort { $b->{date} cmp $a->{date} } @sessions;
+    die "No sessions found.\n" unless @sessions;
 
     my @selected = $ui->interactive_select(\@sessions, \%running);
 
