@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use JSON::PP;
 use POSIX qw();
+use Time::Local qw();
 use App::Saisons::Launcher ();
 sub new { bless {}, shift }
 sub name      { 'Claude Code' }
@@ -25,8 +26,8 @@ sub find_sessions {
         }
         closedir $sdh;
     }
-    my @sessions;
-    opendir my $dh, $projects_dir or return @sessions;
+    my %by_id;
+    opendir my $dh, $projects_dir or return ();
     for my $project (sort readdir $dh) {
         next if $project =~ /^\./;
         my $dir = "$projects_dir/$project";
@@ -40,7 +41,7 @@ sub find_sessions {
             $title //= $running_names{$id} // $first_msg // '(no title)';
             my $size = -s "$dir/$file" // 0;
             my $session_dir = "$dir/$id";
-            push @sessions, {
+            my $candidate = {
                 id       => $id,
                 project  => $project,
                 cwd      => $cwd,
@@ -52,11 +53,18 @@ sub find_sessions {
                 _size    => $size,
                 _adapter => $self,
             };
+            # Deduplicate: keep the copy with the larger file (more content).
+            # Duplicates arise when Claude writes back to the old project dir
+            # after a move_session. The moved copy has the full conversation;
+            # the leftover is tiny (only metadata records, no cwd).
+            if (!exists $by_id{$id} || $size > $by_id{$id}{_size}) {
+                $by_id{$id} = $candidate;
+            }
         }
         closedir $pdh;
     }
     closedir $dh;
-    return @sessions;
+    return values %by_id;
 }
 sub running {
     my ($self) = @_;
@@ -150,7 +158,7 @@ sub _extract_meta {
     my ($file) = @_;
     my ($title, $date, $epoch, $cwd, $first_msg) = (undef, '0000-00-00', 0, undef, undef);
     print STDERR "\033[2KLoading $file ...\r";
-    open my $fh, '<', $file or return ($title, $date, $epoch, $cwd);
+    open my $fh, '<:utf8', $file or return ($title, $date, $epoch, $cwd);
     while (<$fh>) {
         $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
         $cwd   = $1 if !$cwd && /"cwd":"([^"]+)"/;
@@ -165,7 +173,7 @@ sub _extract_meta {
             my $ts = "$1T$2:$3:$4";
             if ($ts gt $date) {
                 $date  = $ts;
-                $epoch = POSIX::mktime($4, $3, $2,
+                $epoch = Time::Local::timegm($4, $3, $2,
                     substr($1,8,2), substr($1,5,2)-1, substr($1,0,4)-1900);
             }
         }
@@ -176,8 +184,6 @@ sub _extract_meta {
 }
 sub _derive_path {
     my ($project) = @_;
-    (my $path = $project) =~ s/^-/\//;
-    $path =~ s/-/\//g;
-    return $path;
+    return $project;
 }
 1;
