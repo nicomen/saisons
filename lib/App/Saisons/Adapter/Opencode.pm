@@ -4,24 +4,15 @@ use warnings;
 use JSON::PP ();
 use POSIX qw();
 use App::Saisons::Launcher ();
-
-# opencode stores sessions under $XDG_DATA_HOME/opencode/storage/session/<projectID>/
-# Each session is a directory containing message JSON files.
-# The session metadata is in a file named with the session UUID.
-# Resume with: opencode --session <sessionID>
-
 sub new { bless {}, shift }
-
 sub name      { 'opencode' }
 sub tag       { "\x{2336} Opc" }
 sub tag_color { 'bold magenta' }
-
 sub find_sessions {
     my ($self) = @_;
     my $data_home = $ENV{XDG_DATA_HOME} // "$ENV{HOME}/.local/share";
     my $storage   = "$data_home/opencode/storage/session";
     return () unless -d $storage;
-
     my @sessions;
     opendir my $dh, $storage or return ();
     for my $project_id (readdir $dh) {
@@ -41,11 +32,9 @@ sub find_sessions {
     closedir $dh;
     return @sessions;
 }
-
 sub running {
     return ();
 }
-
 sub launch {
     my ($self, $sessions, $launcher) = @_;
     for my $s (@$sessions) {
@@ -53,20 +42,17 @@ sub launch {
         App::Saisons::Launcher::launch_cmd($cmd, $s->{cwd}, $launcher, $s->{title});
     }
 }
-
 sub delete_session {
     my ($self, $session) = @_;
     return unlink $session->{_file};
 }
-
 sub load_messages {
     my ($self, $session) = @_;
     my @messages;
-    open my $fh, '<', $session->{_file} or return @messages;
+    open my $fh, '<:utf8', $session->{_file} or return @messages;
     my $json = do { local $/; <$fh> };
     close $fh;
     my $obj = eval { JSON::PP::decode_json($json) } or return @messages;
-
     my $msgs = $obj->{messages} // [];
     for my $msg (@$msgs) {
         my $role = $msg->{role} // '';
@@ -76,20 +62,14 @@ sub load_messages {
     }
     return @messages;
 }
-
-# ── private helpers ───────────────────────────────────────────────────────────
-
 sub _parse_session {
     my ($file, $adapter) = @_;
-
-    open my $fh, '<', $file or return undef;
+    open my $fh, '<:utf8', $file or return undef;
     my $json = do { local $/; <$fh> };
     close $fh;
     my $obj = eval { JSON::PP::decode_json($json) } or return undef;
-
     my $id  = $obj->{id}  or return undef;
     my $cwd = $obj->{cwd} // $ENV{HOME};
-
     my $title = $obj->{title} // $obj->{summary};
     if (!$title) {
         for my $msg (@{ $obj->{messages} // [] }) {
@@ -99,7 +79,6 @@ sub _parse_session {
         }
     }
     $title //= '(no title)';
-
     my ($date_str, $epoch) = ('0000-00-00', 0);
     if (my $ts = $obj->{createdAt} // $obj->{updatedAt}) {
         if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
@@ -111,7 +90,6 @@ sub _parse_session {
             POSIX::tzset();
         }
     }
-
     return {
         id       => $id,
         title    => $title,
@@ -124,7 +102,6 @@ sub _parse_session {
         _adapter => $adapter,
     };
 }
-
 sub _extract_text {
     my ($content) = @_;
     return '' unless defined $content;
@@ -136,5 +113,4 @@ sub _extract_text {
     }
     return $content->{text} // '';
 }
-
 1;
