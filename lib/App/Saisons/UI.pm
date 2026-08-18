@@ -1,10 +1,12 @@
 package App::Saisons::UI;
+
 use strict;
 use warnings;
 use utf8;
-use POSIX qw();           
+use POSIX qw();
 use Term::ANSIColor qw(colored color);
 use JSON::PP ();
+
 my $STATE_FILE = "$ENV{HOME}/.config/saisons/state.json";
 use constant RESET => color('reset');
 sub _col_yellow  { color('yellow') }
@@ -77,9 +79,18 @@ sub _read_key {
                 my $c4 = ''; sysread STDIN, $c4, 1;
                 return 'PGUP'   if $c3 eq '5';
                 return 'PGDN'   if $c3 eq '6';
-                return 'HOME'   if $c3 eq '1';
                 return 'END'    if $c3 eq '4';
                 return 'DELETE' if $c3 eq '3';
+                if ($c3 eq '1') {
+                    if ($c4 eq ';') {
+                        my $c5 = ''; sysread STDIN, $c5, 1;
+                        my $c6 = ''; sysread STDIN, $c6, 1;
+                        return 'SHIFT_UP'   if $c5 eq '2' && $c6 eq 'A';
+                        return 'SHIFT_DOWN' if $c5 eq '2' && $c6 eq 'B';
+                        return 'IGNORE';
+                    }
+                    return 'HOME';
+                }
                 return 'IGNORE';
             }
             return 'IGNORE';
@@ -100,7 +111,7 @@ sub interactive_select {
     my $fulltext    = '';  
     my @sort_cols = qw(selected running agent date size session path title);
     my $sort_idx  = 3;
-    my $sort_rev  = 0;   
+    my $sort_rev  = 1;
     _init_term();
     local $SIG{INT} = sub { _restore_term(); print "\033[?25h\033[0m\n"; STDOUT->flush(); exit 0 };
     print "\033[?25l";  
@@ -145,8 +156,10 @@ sub interactive_select {
             $cursor++;
             $cursor++ while $cursor < $n-1 && $entries[$cursor]{type} eq 'header';
         }
-        elsif ($key eq 'PGUP') { $cursor -= $visible; $offset -= $visible }
-        elsif ($key eq 'PGDN') { $cursor += $visible; $offset += $visible }
+        elsif ($key eq 'PGUP')       { $cursor -= $visible;     $offset -= $visible }
+        elsif ($key eq 'PGDN')       { $cursor += $visible;     $offset += $visible }
+        elsif ($key eq 'SHIFT_UP')   { $cursor -= int($visible/2); $offset -= int($visible/2) }
+        elsif ($key eq 'SHIFT_DOWN') { $cursor += int($visible/2); $offset += int($visible/2) }
         elsif ($key eq 'HOME' || $key eq 'g') { $cursor = 0; $offset = 0 }
         elsif ($key eq 'END'  || $key eq 'G') { $cursor = $n - 1 }
         elsif ($key eq ' ') {
@@ -174,9 +187,9 @@ sub interactive_select {
             }
         }
         elsif ($key eq 'a') {
-            $sel_ids{$_->{id}} = 1 for grep { $_->{type} eq 'session' } @entries;
+            $sel_ids{$_->{session}{id}} = 1 for grep { $_->{type} eq 'session' } @entries;
         }
-        elsif ($key eq 'A') {
+        elsif ($key eq 'A' || $key eq 'c') {
             %sel_ids = ();
         }
         elsif ($key eq 's' || $key eq 'S') {
@@ -222,6 +235,11 @@ sub interactive_select {
         elsif ($key eq 'm') {
             my @to_move = _selected_sessions(\%sel_ids, $sessions);
             if (@to_move) {
+                my @already_running = grep { $running->{ $_->{id} } } @to_move;
+                if (@already_running) {
+                    my $ans = _confirm(scalar(@already_running) . " session(s) are currently running. Moving a running session may corrupt it. Proceed? [y/N] ");
+                    next unless $ans =~ /^y/i;
+                }
                 _restore_term(); print "\033[?25h";
                 _do_move(\@to_move, $sessions, \%sel_ids);
                 $cursor = 0; $offset = 0;
@@ -309,7 +327,7 @@ sub _sorted {
     my ($sessions, $sort_col, $sort_rev, $sel_ids, $running) = @_;
     my $cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
     my @ann = map { { %$_, _sel => $sel_ids->{$_->{id}} ? 1 : 0,
-                              _run => $running->{$_->{id}} ? 1 : 0 } } @$sessions;
+                           _run => $running->{$_->{id}} ? 1 : 0 } } @$sessions;
     my @sorted = sort { $cmp->($a, $b) } @ann;
     @sorted = reverse @sorted if $sort_rev;
     return @sorted;
@@ -328,9 +346,9 @@ sub _build_entries {
         my $dir_cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
         my @dirs = sort {
             my $ann_a = { %{$sorted_dir{$a}[0]}, _sel => $sel_ids->{$sorted_dir{$a}[0]{id}} ? 1 : 0,
-                                                  _run => $running->{$sorted_dir{$a}[0]{id}} ? 1 : 0 };
+                                                 _run => $running->{$sorted_dir{$a}[0]{id}} ? 1 : 0 };
             my $ann_b = { %{$sorted_dir{$b}[0]}, _sel => $sel_ids->{$sorted_dir{$b}[0]{id}} ? 1 : 0,
-                                                  _run => $running->{$sorted_dir{$b}[0]{id}} ? 1 : 0 };
+                                                 _run => $running->{$sorted_dir{$b}[0]{id}} ? 1 : 0 };
             $dir_cmp->($ann_a, $ann_b) || $a cmp $b
         } keys %sorted_dir;
         @dirs = reverse @dirs if $sort_rev;
@@ -408,9 +426,9 @@ sub _render {
     my $banner_lines = 1;
     my $rel_w    = 8;   
     my $size_w   = 6;   
-    my $id_w     = 36;  
+    my $id_w     = 8;
     my $tag_w    = 5;   
-    my $prefix_w = 2;   
+    my $prefix_w = 4;   # ✔ and ● are each 2 terminal columns wide
     my $sep_w    = 2;   
     my $has_sb   = $n > $visible ? 1 : 0;
     my $usable   = $COLS - $has_sb;
@@ -440,20 +458,22 @@ sub _render {
     }
     my $hdr_col = sub {
         my ($key, $label, $w) = @_;
-        my $l = $sort_col eq $key ? colored("$label$sort_arrow", 'bold yellow') : $label;
-        return sprintf "%-${w}s", $l;
+        if ($sort_col eq $key) {
+            return colored("$label$sort_arrow", 'bold yellow') . ' ' x ($w - length($label) - 1);
+        }
+        return sprintf "%-${w}s", $label;
     };
-    my $sel_mark_hdr = $sort_col eq 'selected' ? colored('*',        'bold yellow') : '*';
+    my $sel_mark_hdr = $sort_col eq 'selected' ? colored("\x{2714}", 'bold yellow') : "\x{2714}";
     my $run_mark_hdr = $sort_col eq 'running'  ? colored("\x{25cf}", 'bold yellow') : "\x{25cf}";
     my $hdr = $grouped
-        ? sprintf("%s%s %s  %s  %s  %s  %s",
+        ? sprintf("%s %s   %s%s  %s  %s %s",
             $sel_mark_hdr, $run_mark_hdr,
             $hdr_col->('agent',   'Agt',     $tag_w),
             $hdr_col->('date',    'When',    $rel_w),
             $hdr_col->('size',    'Size',    $size_w),
             $hdr_col->('session', 'Session', $id_w),
             $hdr_col->('title',   'Title',   $title_w))
-        : sprintf("%s%s %s  %s  %s  %s  %s  %s",
+        : sprintf("%s %s   %s%s  %s  %s  %s %s",
             $sel_mark_hdr, $run_mark_hdr,
             $hdr_col->('agent',   'Agt',     $tag_w),
             $hdr_col->('date',    'When',    $rel_w),
@@ -468,8 +488,8 @@ sub _render {
     for my $i ($offset .. $end) {
         my $entry     = $entries->[$i];
         my $active    = $i == $cursor;
-        my $row_idx   = $i - $offset;        
-        my $sb        = $sb_char[$row_idx] // '';  
+        my $row_idx   = $i - $offset;
+        my $sb        = $sb_char[$row_idx] // '';
         if ($entry->{type} eq 'header') {
             my $line = sprintf " %-*s", $usable - 2, $entry->{label};
             $frame .= ($active
@@ -480,12 +500,13 @@ sub _render {
         my $session    = $entry->{session};
         my $is_sel     = $sel_ids->{ $session->{id} };
         my $is_running = $running->{  $session->{id} };
-        my $sel_mark       = $is_sel     ? '*'        : ' ';
-        my $running_bullet = $is_running ? "\x{25cf}" : ' ';
+        my $no_title   = ($session->{title} // '') eq '(no title)';
+        my $sel_mark       = $is_sel     ? "\x{2714}" : ' ';   # ✔ = 2 cols; absent = 2 spaces
+        my $running_bullet = $is_running ? "\x{25cf}" : ' ';   # ● = 2 cols; absent = 2 spaces
         my $tag   = _adapter_tag($session->{_adapter}, $active || $is_sel);
         my $when  = sprintf "%-${rel_w}s",   _rel_time($session->{epoch});
         my $size  = sprintf "%-${size_w}s",  _fmt_size($session->{_size} // 0);
-        my $id    = sprintf "%-${id_w}s",    $session->{id};
+        my $id    = sprintf "%-${id_w}s",    substr($session->{id}, 0, $id_w);
         my $raw_title = substr($session->{title}, 0, $title_w);
         my $raw_path  = $grouped ? '' : _truncate_path($session->{cwd}, $path_w);
         if ($filter && !$active) {
@@ -494,33 +515,28 @@ sub _render {
             $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $grouped;
         }
         my $title    = sprintf "%-${title_w}s", $raw_title;
-        my $path_sep = $grouped ? '' : $raw_path . '  ';
+        my $path_sep = $grouped ? '' : $raw_path . ' ';
         my $row;
-        if ($active && $is_sel) {
-            $row = color('bold white on_magenta') . $sel_mark
-                 . ($is_running ? _col_boldgrn . $running_bullet . color('bold white on_magenta') : ' ')
-                 . " $tag  $when  $size  $id  $path_sep$title"
-                 . RESET;
-        } elsif ($active) {
-            $row = _col_active . $sel_mark
-                 . ($is_running ? _col_boldgrn . $running_bullet . _col_active : ' ')
-                 . " $tag  $when  $size  $id  $path_sep$title"
-                 . RESET;
-        } elsif ($is_sel) {
-            $row = _col_sel . $sel_mark
-                 . ($is_running ? _col_boldgrn . $running_bullet . _col_sel : ' ')
-                 . " $tag  $when  $size  $id  $path_sep$title"
+        my $bg = $active && $is_sel ? color('bold white on_magenta')
+               : $active            ? _col_active
+               : $is_sel            ? _col_sel
+               :                      '';
+        if ($bg) {
+            $row = $bg . $sel_mark . ' '
+                 . ($is_running ? _col_boldgrn . $running_bullet . $bg : ' ') . ' '
+                 . "$tag  $when  $size  $id  $path_sep$title"
                  . RESET;
         } else {
-            my $path_part = $grouped ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . '  ';
-            $row = $sel_mark
-                 . ($is_running ? _col_boldgrn . $running_bullet : ' ')
-                 . ' ' . $tag . RESET . '  '
+            my $path_part = $grouped ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . ' ';
+            my $title_col = $no_title ? color('faint') : _col_white;
+            $row = $sel_mark . ' '
+                 . ($is_running ? _col_boldgrn . $running_bullet . RESET : ' ') . ' '
+                 . $tag . RESET . '  '
                  . _col_yellow . $when . '  '
                  . _col_cyan   . $size . '  '
                  . _col_cyan   . $id   . '  '
                  . $path_part
-                 . _col_white  . $title
+                 . $title_col  . $title
                  . RESET;
         }
         $frame .= $row . "\n";
@@ -539,7 +555,7 @@ sub _render {
     my $toggle_mode = $grouped ? 'flat' : 'grouped';  
     my $pct         = $n > $visible ? sprintf(' %d%%', int(($offset + $visible/2) / $n * 100)) : '';
     my $footer = sprintf(
-        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] →%s  [s]ort:%s  [r]efresh  [/] filter  [?] search  [a/A]  [q]uit   %d sel/%d%s%s',
+        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] →%s  [s]ort:%s  [r]efresh  [/] filter  [?] search  [a] all  [c] clear  [q]uit   %d sel/%d%s%s',
         $toggle_mode, $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct,
         ($filter   ? colored("  /filter: $filter",     'bold cyan')   : '')
       . ($fulltext ? colored("  ?search: $fulltext",   'bold yellow') : ''));
@@ -550,7 +566,7 @@ sub _render {
 sub _sort_popup {
     my ($sort_cols, $current_idx, $reverse) = @_;
     my @labels = (
-        'selected  (*)',
+        "selected  (\x{2714})",
         'running   (●)',
         'agent',
         'date',
@@ -790,7 +806,7 @@ sub _rel_time {
     return 'unknown' unless $epoch;
     my $diff = time() - $epoch;
     return 'just now'                    if $diff < 60;
-    return int($diff/60)       . 'm ago' if $diff < 3600;
+    return int($diff/60)       . 'm ago' if $diff < 7200;
     return int($diff/3600)     . 'h ago' if $diff < 86400;
     return int($diff/86400)    . 'd ago' if $diff < 86400 * 30;
     return int($diff/86400/30) . 'mo ago' if $diff < 86400 * 365;
