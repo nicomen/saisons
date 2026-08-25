@@ -2,6 +2,7 @@ use strict;
 use warnings;
 use Test::More;
 use File::Spec;
+use File::Path qw(make_path);
 use File::Temp qw(tempdir);
 use File::Copy::Recursive qw(dircopy);
 use lib 'lib';
@@ -179,28 +180,84 @@ sub session_ok {
 
 # ── opencode ──────────────────────────────────────────────────────────────────
 
-{
+subtest 'opencode' => sub {
     require App::Saisons::Adapter::Opencode;
     my $adapter = App::Saisons::Adapter::Opencode->new;
     adapter_ok($adapter);
 
-    local $ENV{HOME}         = "$fixtures/opencode";
-    local $ENV{XDG_DATA_HOME} = "$fixtures/opencode/.local/share";
+    plan skip_all => 'sqlite3 CLI not available'
+        unless App::Saisons::Adapter::Opencode::_sqlite3();
+
+    # Build a fixture DB mirroring opencode's storage layout
+    my $tmp  = tempdir(CLEANUP => 1);
+    my $data = "$tmp/.local/share";
+    make_path("$data/opencode");
+    my $db = "$data/opencode/opencode.db";
+
+    my $sql = <<'SQL';
+CREATE TABLE session (
+    id text PRIMARY KEY,
+    directory text NOT NULL,
+    title text NOT NULL,
+    time_created integer NOT NULL,
+    time_updated integer NOT NULL,
+    time_archived integer
+);
+CREATE TABLE message (
+    id text PRIMARY KEY,
+    session_id text NOT NULL,
+    time_created integer NOT NULL,
+    data text NOT NULL
+);
+CREATE TABLE part (
+    id text PRIMARY KEY,
+    message_id text NOT NULL,
+    session_id text NOT NULL,
+    time_created integer NOT NULL,
+    data text NOT NULL
+);
+INSERT INTO session VALUES ('ses_live0000000000001','/home/user/myproject','Add opentelemetry tracing',1768474200000,1768474800000,NULL);
+INSERT INTO session VALUES ('ses_arch0000000000001','/home/user/myproject','Archived session',1768470000000,1768470100000,1768470200000);
+INSERT INTO message VALUES ('msg_u1','ses_live0000000000001',1768474201000,'{"role":"user"}');
+INSERT INTO part VALUES ('part_u1a','msg_u1','ses_live0000000000001',1768474201100,'{"type":"text","text":"Please add opentelemetry tracing to the API"}');
+INSERT INTO message VALUES ('msg_a1','ses_live0000000000001',1768474202000,'{"role":"assistant"}');
+INSERT INTO part VALUES ('part_a1r','msg_a1','ses_live0000000000001',1768474202100,'{"type":"reasoning","text":"thinking..."}');
+INSERT INTO part VALUES ('part_a1t','msg_a1','ses_live0000000000001',1768474202200,'{"type":"text","text":"Done, tracing is wired up."}');
+SQL
+    my $exe = App::Saisons::Adapter::Opencode::_sqlite3();
+    ok(system($exe, $db, $sql) == 0, 'opencode: built fixture DB');
+
+    local $ENV{HOME}          = $tmp;
+    local $ENV{XDG_DATA_HOME} = $data;
+
     my @sessions = $adapter->find_sessions;
-    ok(@sessions == 1, 'opencode: found 1 session');
+    ok(@sessions == 1, 'opencode: found 1 live session (archived skipped)');
 
     my $s = $sessions[0];
     session_ok($s, 'opencode session');
-    is($s->{id},    'dddddddd-eeee-ffff-0000-111111111111', 'opencode: correct id');
-    is($s->{title}, 'Add opentelemetry tracing',            'opencode: first user message as title');
-    is($s->{cwd},   '/home/user/myproject',                 'opencode: correct cwd');
-    like($s->{date}, qr/^2026-01-15/,                       'opencode: correct date');
+    is($s->{id},     'ses_live0000000000001',     'opencode: correct id');
+    is($s->{title},  'Add opentelemetry tracing', 'opencode: title from session row');
+    is($s->{cwd},    '/home/user/myproject',      'opencode: correct cwd');
+    like($s->{date}, qr/^2026-01-15/,             'opencode: correct date');
+    is($s->{epoch},  1768474800,                  'opencode: epoch derived from ms timestamp');
+    cmp_ok($s->{_size}, '>', 0,                   'opencode: size from message+part bytes');
+
+    # XDG_DATA_HOME unset → falls back to $HOME/.local/share
+    {
+        local $ENV{XDG_DATA_HOME} = undef;
+        my @fallback = $adapter->find_sessions;
+        ok(@fallback == 1, 'opencode: HOME fallback finds sessions without XDG_DATA_HOME');
+    }
 
     my @msgs = $adapter->load_messages($s);
-    ok(@msgs == 2,                            'opencode: loaded 2 messages');
+    ok(@msgs == 2,                            'opencode: loaded 2 messages (reasoning skipped)');
     is($msgs[0]{role}, 'user',                'opencode: first message is user');
     is($msgs[1]{role}, 'assistant',           'opencode: second message is assistant');
     like($msgs[0]{text}, qr/opentelemetry/,   'opencode: user message text');
-}
+    like($msgs[1]{text}, qr/wired up/,        'opencode: assistant message text');
+
+    ok($adapter->delete_session($s),          'opencode: delete_session succeeded');
+    ok(!scalar $adapter->find_sessions,       'opencode: no sessions after delete');
+};
 
 done_testing;

@@ -131,9 +131,11 @@ CLAUDE_SESSIONS_LAUNCHER=tmux saisons
 | Aider | `.aider.chat.history.md` per project dir | `aider --restore-chat-history` |
 | OpenAI Codex | `~/.codex/sessions/YYYY/MM/DD/` | `codex resume <file>` |
 | Gemini CLI | `~/.gemini/tmp/<slug>/chats/` | `gemini --resume <uuid>` |
-| opencode | `$XDG_DATA_HOME/opencode/storage/session/` | `opencode --session <id>` |
+| opencode | `~/.local/share/opencode/opencode.db` (SQLite) | `opencode --session <id>` |
 
 Aider history files are searched one level deep under `~/projects`, `~/dev`, `~/src`, `~/work`, `~/code`, and `/projects`. Override with `SAISONS_SEARCH_DIRS=dir1:dir2`.
+
+The opencode adapter reads its SQLite database via the `sqlite3` CLI, which must be installed. `XDG_DATA_HOME` is respected.
 
 ## Adding support for other agents
 
