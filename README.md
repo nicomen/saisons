@@ -9,7 +9,7 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 ## Features
 
 - Browse all sessions across all agents and projects
-- Agent tag with brand colors (`✶ Cld`, `a Aid`, `☁ Cdx`, `✦ Gem`, `⌬ Opc`)
+- Agent tag with brand colors (`✶ Cld`, `a Aid`, `☁ Cdx`, `✦ Gem`, `⎕ Opc`)
 - Relative timestamps (`2h ago`, `3d ago`) and session size column
 - Running session indicators (`●`)
 - Sort by any column (`s` ascending, `S` descending)

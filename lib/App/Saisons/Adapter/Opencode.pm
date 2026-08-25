@@ -6,7 +6,7 @@ use POSIX qw();
 use App::Saisons::Launcher ();
 sub new { bless {}, shift }
 sub name      { 'opencode' }
-sub tag       { "\x{2336} Opc" }
+sub tag       { "\x{2395} Opc" }
 sub tag_color { 'bold magenta' }
 
 my $SQLITE3;
