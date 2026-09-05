@@ -61,6 +61,11 @@ To rebuild the fatpacked `saisons` script after editing sources:
 make fatpack
 ```
 
+`make fatpack` runs `slimpack -o saisons bin/saisons` (the external
+App-SlimPacker bundler, which minifies; needs `slimpack` on `PATH` and
+`PPI`). `saisons` is generated output — edit `bin/saisons` and `lib/`, not
+`saisons`.
+
 ### macOS
 
 ```sh

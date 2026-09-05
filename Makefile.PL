@@ -2,6 +2,8 @@ use strict;
 use warnings;
 use ExtUtils::MakeMaker;
 
+use utf8;
+
 WriteMakefile(
     NAME             => 'App::Saisons',
     AUTHOR           => 'Nicolas Mendoza <mendoza@pvv.ntnu.no>',
@@ -38,14 +40,7 @@ package MY;
 sub postamble {
     return <<'MAKE';
 fatpack: bin/saisons
-	fatpack trace bin/saisons
-	perl -MModule::CoreList -e 'while(<STDIN>){chomp;(my$$m=$$_)=~s|/|::|g;$$m=~s|\.pm$$||;print "$$_\n" unless Module::CoreList::is_core($$m)}' < fatpacker.trace > non-core.trace
-	fatpack packlists-for $$(cat non-core.trace) > packlists
-	fatpack tree $$(cat packlists)
-	perl maint/pack.pl > saisons
-	chmod +x saisons
-	rm -f fatpacker.trace non-core.trace packlists
-	rm -rf fatlib
+	slimpack -o saisons bin/saisons
 	@echo "saisons is now fatpacked and minified — ready to commit"
 
 MAKE
