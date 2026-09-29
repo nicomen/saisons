@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use JSON::PP ();
 use POSIX qw();
+use Encode qw(decode);
 use App::Saisons::Launcher ();
 sub new { bless {}, shift }
 sub name      { 'opencode' }
@@ -61,10 +62,34 @@ sub _sqlite_exec {
     return system($cmd) == 0;
 }
 
+sub _session_title {
+    my ($row) = @_;
+    my $title = $row->{title} // '';
+    return $title if length($title) && $title !~ /\ANew session - /;
+    my $text = _first_text($row->{first_hex});
+    return $text if length $text;
+    return '(no title)';
+}
+
+sub _first_text {
+    my ($hex) = @_;
+    return '' unless defined $hex && length $hex;
+    my $text;
+    {
+        no warnings 'utf8';
+        $text = decode('UTF-8', pack('H*', $hex), Encode::FB_DEFAULT);
+    }
+    $text =~ s/\s+/ /g;
+    $text =~ s/\A\s+//;
+    $text =~ s/\s+\z//;
+    $text = substr($text, 0, 79) . "\x{2026}" if length($text) > 80;
+    return $text;
+}
+
 sub find_sessions {
     my ($self) = @_;
     my $rows = $self->_sqlite_out(<<'SQL') or return ();
-SELECT s.id AS id, s.directory AS dir, s.title AS title, s.time_created AS created_ms, s.time_updated AS updated_ms, COALESCE((SELECT SUM(LENGTH(d.data)) FROM ( SELECT data FROM message WHERE session_id = s.id UNION ALL SELECT data FROM part WHERE session_id = s.id ) d), 0) AS bytes FROM session s WHERE s.time_archived IS NULL ORDER BY s.time_updated DESC
+SELECT s.id AS id, s.directory AS dir, s.title AS title, s.time_created AS created_ms, s.time_updated AS updated_ms, COALESCE((SELECT SUM(LENGTH(d.data)) FROM ( SELECT data FROM message WHERE session_id = s.id UNION ALL SELECT data FROM part WHERE session_id = s.id ) d), 0) AS bytes, hex((SELECT json_extract(p.data, '$.text') FROM part p JOIN message m ON m.id = p.message_id WHERE p.session_id = s.id AND json_valid(p.data) AND json_extract(p.data, '$.type') = 'text' AND json_valid(m.data) AND json_extract(m.data, '$.role') = 'user' ORDER BY p.time_created, p.id LIMIT 1)) AS first_hex FROM session s WHERE s.time_archived IS NULL ORDER BY s.time_updated DESC
 SQL
     my @sessions;
     for my $row (@$rows) {
@@ -73,7 +98,7 @@ SQL
         my $epoch = int($ms / 1000);
         push @sessions, {
             id       => $row->{id},
-            title    => length($row->{title} // '') ? $row->{title} : '(no title)',
+            title    => _session_title($row),
             date     => POSIX::strftime('%Y-%m-%dT%H:%M:%S', gmtime($epoch)),
             epoch    => $epoch,
             cwd      => length($row->{dir} // '') ? $row->{dir} : $ENV{HOME},
