@@ -6,6 +6,7 @@ use utf8;
 use POSIX qw();
 use Term::ANSIColor qw(colored color);
 use JSON::PP ();
+use Encode qw(decode);
 
 my $STATE_FILE = "$ENV{HOME}/.config/saisons/state.json";
 use constant RESET => color('reset');
@@ -379,8 +380,12 @@ sub _search_content {
         push @files, _find_jsonl_files($dir);
     }
     for my $file (@files) {
-        open my $fh, '<:utf8', $file or next;
+        open my $fh, '<', $file or next;
         while (my $line = <$fh>) {
+            {
+                no warnings 'utf8';
+                $line = decode('UTF-8', $line, Encode::FB_DEFAULT);
+            }
             if ($line =~ $re) { close $fh; return 1 }
         }
         close $fh;
