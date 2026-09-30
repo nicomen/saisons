@@ -39,9 +39,15 @@ sub _save_state {
     close $fh;
 }
 my ($OLD_TERM, $ROWS, $COLS);
+sub _set_term_title {
+    my ($title) = @_;
+    return unless -t STDOUT;
+    print "\033]2;$title\007";
+}
 sub _init_term {
     binmode STDOUT, ':utf8';
     STDOUT->autoflush(1);
+    _set_term_title('SAISONS');
     ($ROWS, $COLS) = _term_size();
     my $tty = \*STDIN;
     $OLD_TERM = POSIX::Termios->new;
@@ -55,6 +61,7 @@ sub _init_term {
 }
 sub _restore_term {
     $OLD_TERM->setattr(fileno(\*STDIN), POSIX::TCSANOW) if $OLD_TERM;
+    _set_term_title('');
 }
 sub _term_size {
     my $s = `stty size 2>/dev/null`;
