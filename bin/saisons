@@ -32,7 +32,7 @@ my %running;
 
 # ── detect launcher ───────────────────────────────────────────────────────────
 
-my $launcher = $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
+my $launcher = $ENV{SAISONS_LAUNCHER} // $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
     if    ($ENV{TMUX})                                          { 'tmux' }
     elsif ($ENV{STY})                                           { 'screen' }
     elsif (($ENV{DISPLAY} || $ENV{WAYLAND_DISPLAY})
