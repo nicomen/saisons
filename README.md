@@ -26,22 +26,30 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 
 Requires Perl 5.10+.
 
-### Linux / macOS (quickest)
+### Linux / macOS / WSL
 
-Downloads the self-contained fatpacked script — no lib setup needed:
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
+```
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/nicomen/saisons/main/install.ps1 | iex
+```
+
+Installs [Strawberry Perl](https://strawberryperl.com/) via `winget` if needed, then downloads the script and creates a `.cmd` wrapper.
+
+### Other ways
+
+Grab the self-contained fatpacked script directly — a single file, no dependencies:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o ~/.local/bin/saisons
 chmod +x ~/.local/bin/saisons
 ```
 
-Or use the installer which handles PATH setup automatically:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
-```
-
-### cpanm
+Or with cpanm:
 
 ```sh
 cpanm https://github.com/nicomen/saisons/archive/main.tar.gz
@@ -66,18 +74,6 @@ App-SlimPacker bundler, which minifies; needs `slimpack` on `PATH` and
 `PPI`). `saisons` is generated output — edit `bin/saisons` and `lib/`, not
 `saisons`.
 
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/nicomen/saisons/main/install.ps1 | iex
-```
-
-Installs [Strawberry Perl](https://strawberryperl.com/) via `winget` if needed, then downloads the script and creates a `.cmd` wrapper.
-
-### WSL
-
-Follow the Linux/macOS instructions inside your WSL shell.
-
 ## Usage
 
 ```sh
@@ -95,9 +91,9 @@ saisons
 | `End` / `G` | Jump to bottom |
 | `Space` | Toggle select |
 | `a` / `A` | Select all / deselect all |
-| `s` | Sort popup (ascending) |
-| `S` | Sort popup (descending) |
-| `t` | Toggle flat / group-by-directory view |
+| `s` | Sort mode: `←`/`→` pick the column, `↑`/`↓` the direction |
+| `S` | Flip sort direction |
+| `t` | Cycle grouping: flat / by path / by agent |
 | `r` | Refresh running session indicators |
 | `Enter` | Open selected sessions (cursor session if none marked) |
 | `v` | View conversation history |
@@ -107,12 +103,24 @@ saisons
 | `?` | Full-text search (scans session files) |
 | `q` / `ESC` | Quit (selection is remembered) |
 
-### Launcher override
+### Where sessions open (the launcher)
+
+`ENTER` resumes each selected session by running its agent's resume command
+(e.g. `claude --resume <id>`) in the session's directory. The launcher
+decides *in which terminal* that command runs:
+
+- `tmux` / `screen` — one new multiplexer window per session
+- `gnome-terminal` / `iterm` / `terminal-app` — one new tab or window per session
+- `inline` — run in the current terminal, one session after the other
+
+saisons picks one automatically (in tmux → `tmux`, GUI with gnome-terminal →
+`gnome-terminal`, macOS → `iterm`/`terminal-app`, otherwise `inline`).
+Override it when the guess isn't what you want — for example to take over
+the current pane even though you are inside tmux:
 
 ```sh
-SAISONS_SEARCH_DIRS=~/projects:~/work saisons
-SAISONS_LAUNCHER=tmux saisons
-# launcher options: tmux, screen, gnome-terminal, iterm, terminal-app, inline
+SAISONS_LAUNCHER=inline saisons
+# tmux, screen, gnome-terminal, iterm, terminal-app, inline
 # (the old name CLAUDE_SESSIONS_LAUNCHER still works)
 ```
 
