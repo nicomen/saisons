@@ -26,7 +26,7 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 
 Requires Perl 5.10+.
 
-### curl (quickest)
+### Linux / macOS (quickest)
 
 Downloads the self-contained fatpacked script — no lib setup needed:
 
@@ -65,19 +65,6 @@ make fatpack
 App-SlimPacker bundler, which minifies; needs `slimpack` on `PATH` and
 `PPI`). `saisons` is generated output — edit `bin/saisons` and `lib/`, not
 `saisons`.
-
-### macOS
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/saisons -o ~/.local/bin/saisons
-chmod +x ~/.local/bin/saisons
-```
-
-Or via the installer:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/nicomen/saisons/main/install.sh | sh
-```
 
 ### Windows
 
@@ -124,8 +111,9 @@ saisons
 
 ```sh
 SAISONS_SEARCH_DIRS=~/projects:~/work saisons
-CLAUDE_SESSIONS_LAUNCHER=tmux saisons
+SAISONS_LAUNCHER=tmux saisons
 # launcher options: tmux, screen, gnome-terminal, iterm, terminal-app, inline
+# (the old name CLAUDE_SESSIONS_LAUNCHER still works)
 ```
 
 ## Supported agents
