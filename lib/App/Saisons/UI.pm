@@ -16,8 +16,10 @@ sub _col_cyan    { color('cyan') }
 sub _col_green   { color('green') }
 sub _col_white   { color('white') }
 sub _col_boldgrn { color('bold green') }
-sub _col_sel     { color('black on_cyan') }
-sub _col_active  { color('white on_blue') }
+# background-only bars (256-color): column colors stay readable on top
+sub _col_sel        { "\e[48;5;23m" }   # dark teal
+sub _col_active     { "\e[48;5;24m" }   # muted steel blue
+sub _col_active_sel { "\e[48;5;30m" }   # brighter teal
 sub _str_bold    { colored($_[0], 'bold') }
 sub _str_dim     { colored($_[0], 'faint') }
 sub _str_boldyel { colored($_[0], 'bold yellow') }
@@ -793,41 +795,35 @@ sub _render {
         my $no_title   = ($session->{title} // '') eq '(no title)';
         my $sel_mark       = $is_sel     ? "\x{2714}" : ' ';   # ✔ = 2 cols; absent = 2 spaces
         my $running_bullet = $is_running ? "\x{25cf}" : ' ';   # ● = 2 cols; absent = 2 spaces
-        my $tag   = _adapter_tag($session->{_adapter}, $active || $is_sel);
+        my $tag   = _adapter_tag($session->{_adapter}, 0);
         my $when  = sprintf "%-${rel_w}s",   _rel_time($session->{epoch});
         my $size  = sprintf "%-${size_w}s",  _fmt_size($session->{_size} // 0);
         my $id    = sprintf "%-${id_w}s",    substr($session->{id}, 0, $id_w);
         my $raw_title = substr($session->{title}, 0, $title_w);
         my $raw_path  = $hide_path ? '' : _truncate_path($session->{cwd}, $path_w);
-        if ($filter && !$active) {
+        if ($filter) {
             my $re = _qr($filter) // qr/(?!)/;
             $raw_title =~ s/$re/colored($1, 'bold reverse')/ge;
             $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $hide_path;
         }
-        my $title    = sprintf "%-${title_w}s", $raw_title;
-        my $path_sep = $hide_path ? '' : $raw_path . ' ';
-        my $row;
-        my $bg = $active && $is_sel ? color('bold white on_magenta')
+        my $title = sprintf "%-${title_w}s", $raw_title;
+        my $bg = $active && $is_sel ? _col_active_sel
                : $active            ? _col_active
                : $is_sel            ? _col_sel
                :                      '';
+        my $row = $sel_mark . ' '
+             . ($is_running ? _col_boldgrn . $running_bullet . RESET : ' ') . ' '
+             . $tag . RESET . ' '
+             . _col_yellow . $when . ' '
+             . _col_cyan   . $size . ' '
+             . _col_cyan   . $id   . ' '
+             . ($hide_path ? '' : _col_green . $raw_path . ' ')
+             . ($no_title ? color('faint') : _col_white) . $title
+             . RESET;
         if ($bg) {
-            $row = $bg . $sel_mark . ' '
-                 . ($is_running ? _col_boldgrn . $running_bullet . $bg : ' ') . ' '
-                 . "$tag $when $size $id $path_sep$title"
-                 . RESET;
-        } else {
-            my $path_part = $hide_path ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . ' ';
-            my $title_col = $no_title ? color('faint') : _col_white;
-            $row = $sel_mark . ' '
-                 . ($is_running ? _col_boldgrn . $running_bullet . RESET : ' ') . ' '
-                 . $tag . RESET . ' '
-                 . _col_yellow . $when . ' '
-                 . _col_cyan   . $size . ' '
-                 . _col_cyan   . $id   . ' '
-                 . $path_part
-                 . $title_col  . $title
-                 . RESET;
+            # keep the column colors and re-arm the bar after every reset
+            $row =~ s/\e\[0m/\e[0m$bg/g;
+            $row = $bg . $row . RESET;
         }
         $frame .= $row . "\n";
     }
