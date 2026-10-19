@@ -7,6 +7,7 @@ use POSIX qw();
 use Term::ANSIColor qw(colored color);
 use JSON::PP ();
 use Encode qw(decode);
+use Time::Local ();
 
 my $STATE_FILE = "$ENV{HOME}/.config/saisons/state.json";
 use constant RESET => color('reset');
@@ -39,6 +40,12 @@ sub _save_state {
     close $fh;
 }
 my ($OLD_TERM, $ROWS, $COLS);
+my $RESIZED = 0;
+my $CASE_SENSITIVE = 0;
+sub _qr {
+    my ($q) = @_;
+    return eval { $CASE_SENSITIVE ? qr/(\Q$q\E)/ : qr/(\Q$q\E)/i };
+}
 sub _set_term_title {
     my ($title) = @_;
     return unless -t STDOUT;
@@ -48,7 +55,6 @@ sub _init_term {
     binmode STDOUT, ':utf8';
     STDOUT->autoflush(1);
     _set_term_title('SAISONS');
-    ($ROWS, $COLS) = _term_size();
     my $tty = \*STDIN;
     $OLD_TERM = POSIX::Termios->new;
     $OLD_TERM->getattr(fileno($tty));
@@ -67,7 +73,27 @@ sub _term_size {
     my $s = `stty size 2>/dev/null`;
     return ($s =~ /^(\d+)\s+(\d+)/) ? ($1, $2) : (40, 120);
 }
+sub _check_resize {
+    my ($rows, $cols) = _term_size();
+    # a size change reflows/wraps the old frame, so a home-and-overwrite
+    # redraw is not enough; wipe the screen before rendering
+    print "\033[2J" if defined $ROWS && ($rows != $ROWS || $cols != $COLS);
+    ($ROWS, $COLS) = ($rows, $cols);
+}
+sub _input_pending {
+    my ($timeout) = @_;
+    return 1 if $RESIZED;
+    my $rin = '';
+    vec($rin, fileno(STDIN), 1) = 1;
+    return (select($rin, undef, undef, $timeout) || 0) > 0;
+}
 sub _read_key {
+    # wait in select() so SIGWINCH interrupts us; a blocked sysread would
+    # be restarted (SA_RESTART) and the resize would go unnoticed
+    while (1) {
+        if ($RESIZED) { $RESIZED = 0; return 'RESIZE' }
+        last if _input_pending(0.5);
+    }
     my $c = '';
     sysread STDIN, $c, 1;
     if ($c eq "\033") {
@@ -76,6 +102,7 @@ sub _read_key {
         return 'ESC' unless select($rin, undef, undef, 0.05);
         my $c2 = '';
         sysread STDIN, $c2, 1;
+        return "ALT_$c2" if $c2 =~ /^[a-zA-Z]$/;   # ESC+letter = Alt+letter
         if ($c2 eq '[') {
             my $c3 = '';
             sysread STDIN, $c3, 1;
@@ -107,62 +134,94 @@ sub _read_key {
     }
     return $c;
 }
+sub _clamp_list {
+    my ($entries, $cursor, $offset, $visible) = @_;
+    my $n = scalar @$entries;
+    $cursor = 0      if $cursor < 0;
+    $cursor = $n - 1 if $cursor >= $n && $n;
+    $cursor++ while $cursor < $n - 1 && $entries->[$cursor] && $entries->[$cursor]{type} ne 'session';
+    $cursor-- while $cursor > 0      && $entries->[$cursor] && $entries->[$cursor]{type} ne 'session';
+    if ($n <= $visible) {
+        $offset = 0;
+    } else {
+        my $max = $n - $visible;
+        $offset = $max if $offset > $max;
+        $offset = $cursor                if $cursor < $offset;
+        $offset = $cursor - $visible + 1 if $cursor >= $offset + $visible;
+        $offset = 0 if $offset < 0;
+    }
+    return ($cursor, $offset);
+}
+sub _move_cursor {
+    my ($entries, $cursor, $step) = @_;
+    my $n = scalar @$entries;
+    $cursor += $step;
+    if ($step > 0) {
+        $cursor++ while $cursor < $n - 1 && $entries->[$cursor] && $entries->[$cursor]{type} ne 'session';
+    } else {
+        $cursor-- while $cursor > 0 && $entries->[$cursor] && $entries->[$cursor]{type} ne 'session';
+    }
+    return $cursor;
+}
 sub interactive_select {
     my ($self, $sessions, $running) = @_;
     $running //= {};
     my $state   = _load_state();
     my %sel_ids = map { $_ => 1 } @{ $state->{selected} // [] };
-    my $grouped = $state->{grouped} // 0;  
+    my $group_by = $state->{grouped} // '';           # '', 'path' or 'agent'
+    $group_by = 'path' if $group_by eq '1';           # legacy boolean state
+    $group_by = ''     if $group_by eq '0';
     my $cursor  = 0;
-    my $offset      = 0;   
-    my $filter      = '';  
-    my $fulltext    = '';  
+    my $offset      = 0;
+    my $filter      = '';
+    my $fulltext    = '';
+    my ($ft_sig, @ft_hits, $ft_match);   # cached full-text results; the scan reads every session file
     my @sort_cols = qw(selected running agent date size session path title);
     my $sort_idx  = 3;
     my $sort_rev  = 1;
+    my $sort_mode = 0;
     _init_term();
-    local $SIG{INT} = sub { _restore_term(); print "\033[?25h\033[0m\n"; STDOUT->flush(); exit 0 };
+    local $SIG{INT}   = sub { _restore_term(); print "\033[?25h\033[0m\n"; STDOUT->flush(); exit 0 };
+    local $SIG{WINCH} = sub { $RESIZED = 1 };
     print "\033[?25l";  
     my @result;
     while (1) {
-        ($ROWS, $COLS) = _term_size();
+        _check_resize();
         my @filtered = grep { ref $_ eq 'HASH' } @$sessions;
         if ($filter) {
-            my $re = eval { qr/\Q$filter\E/i } // qr/(?!)/;
+            my $re = _qr($filter) // qr/(?!)/;
             @filtered = grep {
                 $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re
             } @filtered;
         }
         if ($fulltext) {
-            @filtered = grep { _search_content($_, $fulltext) } @filtered;
+            my $sig = "$filter\0$fulltext\0$CASE_SENSITIVE";
+            unless (defined $ft_sig && $ft_sig eq $sig) {
+                @ft_hits  = _fulltext_filter(\@filtered, $fulltext);
+                $ft_match = _match_map(@ft_hits);
+                $ft_sig   = $sig;
+            }
+            _apply_match_rows(\@ft_hits, $ft_match);
+            @filtered = @ft_hits;
+        } else {
+            undef $ft_sig;
+            delete $_->{_match} for @filtered;
         }
         my $visible_sessions = \@filtered;
         my $sort_col = $sort_cols[$sort_idx];
-        my @entries = _build_entries($visible_sessions, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
+        my @entries = _build_entries($visible_sessions, $running, \%sel_ids, $group_by, $sort_col, $sort_rev);
         my $n       = scalar @entries;
-        my $visible = $ROWS - 3 - 1;  
-        $cursor = 0      if $cursor < 0;
-        $cursor = $n - 1 if $cursor >= $n && $n;
-        $cursor++ while $cursor < $n - 1 && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
-        $cursor-- while $cursor > 0      && $entries[$cursor] && $entries[$cursor]{type} eq 'header';
-        if ($n <= $visible) {
-            $offset = 0;
-        } else {
-            my $max = $n - $visible;
-            $offset = $max if $offset > $max;
-            $offset = $cursor              if $cursor < $offset;
-            $offset = $cursor - $visible + 1 if $cursor >= $offset + $visible;
-            $offset = 0 if $offset < 0;
-        }
-        _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev);
+        my $visible = $ROWS - 3 - 1;
+        ($cursor, $offset) = _clamp_list(\@entries, $cursor, $offset, $visible);
+        _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $group_by, $running, $filter, $fulltext, $sort_col, $sort_rev, $sort_mode);
         my $key = _read_key();
         if ($key eq 'UP' || $key eq 'k') {
-            $cursor--;
-            $cursor-- while $cursor > 0 && $entries[$cursor]{type} eq 'header';
+            if ($sort_mode && $key eq 'UP') { $sort_rev = 0; $cursor = 0; $offset = 0 }
+            else { $cursor = _move_cursor(\@entries, $cursor, -1) }
         }
         elsif ($key eq 'DOWN' || $key eq 'j') {
-            $cursor++;
-            $cursor++ while $cursor < $n-1 && $entries[$cursor]{type} eq 'header';
+            if ($sort_mode && $key eq 'DOWN') { $sort_rev = 1; $cursor = 0; $offset = 0 }
+            else { $cursor = _move_cursor(\@entries, $cursor, +1) }
         }
         elsif ($key eq 'PGUP')       { $cursor -= $visible;     $offset -= $visible }
         elsif ($key eq 'PGDN')       { $cursor += $visible;     $offset += $visible }
@@ -178,6 +237,7 @@ sub interactive_select {
             }
         }
         elsif ($key eq "\n" || $key eq "\r") {
+            if ($sort_mode) { $sort_mode = 0; next }
             my @to_open = _selected_sessions(\%sel_ids, $sessions);
             unless (@to_open) {
                 my $e = $entries[$cursor];
@@ -189,7 +249,7 @@ sub interactive_select {
                     my $ans = _confirm(scalar(@already_running) . " session(s) already running. Open anyway? [y/N] ");
                     next unless $ans =~ /^y/i;
                 }
-                _save_state({ selected => [map { $_->{id} } @to_open], grouped => $grouped });
+                _save_state({ selected => [map { $_->{id} } @to_open], grouped => $group_by });
                 @result = @to_open;
                 last;
             }
@@ -200,18 +260,33 @@ sub interactive_select {
         elsif ($key eq 'A' || $key eq 'c') {
             %sel_ids = ();
         }
-        elsif ($key eq 's' || $key eq 'S') {
-            my $new_rev = $key eq 'S' ? 1 : 0;
-            my ($new_idx) = _sort_popup(\@sort_cols, $sort_idx, $new_rev);
-            if (defined $new_idx) {
-                $sort_idx = $new_idx;
-                $sort_rev = $new_rev;
-                $cursor = 0; $offset = 0;
+        elsif ($key eq 's') {
+            $sort_mode = !$sort_mode;
+        }
+        elsif ($key eq 'S') {
+            $sort_rev = !$sort_rev;
+            $cursor = 0; $offset = 0;
+        }
+        elsif ($key eq 'LEFT' || $key eq 'RIGHT') {
+            if ($sort_mode) {
+                my $step = $key eq 'RIGHT' ? 1 : -1;
+                my $idx  = $sort_idx;
+                do { $idx += $step }
+                    while $idx >= 0 && $idx < @sort_cols && $group_by eq 'path' && $sort_cols[$idx] eq 'path';
+                if ($idx >= 0 && $idx < @sort_cols) {
+                    $sort_idx = $idx;
+                    $cursor = 0; $offset = 0;
+                }
             }
         }
         elsif ($key eq 't') {
-            $grouped = !$grouped;
+            $group_by = $group_by eq ''     ? 'path'
+                      : $group_by eq 'path' ? 'agent'
+                      :                       '';
             $cursor = 0; $offset = 0;
+        }
+        elsif ($key eq "\x0c") {  # Ctrl+L: force full repaint
+            print "\033[2J";
         }
         elsif ($key eq 'r') {
             my %seen;
@@ -237,6 +312,7 @@ sub interactive_select {
             }
             if (@to_del) {
                 _do_delete(\@to_del, $sessions, \%sel_ids);
+                undef $ft_sig;
                 $cursor = 0; $offset = 0;
             }
         }
@@ -250,6 +326,7 @@ sub interactive_select {
                 }
                 _restore_term(); print "\033[?25h";
                 _do_move(\@to_move, $sessions, \%sel_ids);
+                undef $ft_sig;
                 $cursor = 0; $offset = 0;
                 _init_term(); print "\033[?25l";
             }
@@ -260,54 +337,108 @@ sub interactive_select {
                 ? colored('?search: ', 'bold yellow')
                 : colored('/filter: ', 'bold cyan');
             my $query = $is_fulltext ? $fulltext : $filter;
+            my @pv_stack;   # [query, [hits]] per typed prefix: extending a substring
+                            # search can only narrow, so each scan starts from the
+                            # previous prefix's hits, and backspace pops for free
+            my $draw_prompt = sub {
+                print "\033[${ROWS};1H\033[K";
+                my $flag = $CASE_SENSITIVE ? colored(' [case sensitive]', 'bold yellow') : '';
+                my $hint = ' (M-C=toggle case ENTER=' . ($is_fulltext ? 'search' : 'apply') . ' ESC=cancel)';
+                print $prompt . colored($query, 'bold white') . $flag . colored($hint, 'faint');
+                STDOUT->flush();
+            };
+            my ($cur2, $off2) = (0, 0);
+            my $q_dirty = 0;   # true while query edits may still be in flight
             while (1) {
                 my @f2 = grep { ref $_ eq 'HASH' } @$sessions;
                 if (!$is_fulltext && $query) {
-                    my $re = eval { qr/\Q$query\E/i } // qr/(?!)/;
+                    my $re = _qr($query) // qr/(?!)/;
                     @f2 = grep { $_->{title} =~ $re || $_->{cwd} =~ $re || $_->{date} =~ $re } @f2;
                 } elsif ($is_fulltext && $query) {
-                    @f2 = grep { _search_content($_, $query) } @f2;
+                    pop @pv_stack while @pv_stack && index($query, $pv_stack[-1][0]) != 0;
+                    if (@pv_stack && $pv_stack[-1][0] eq $query) {
+                        _apply_match_rows($pv_stack[-1][1], $pv_stack[-1][2]);
+                        @f2 = @{ $pv_stack[-1][1] };
+                        $q_dirty = 0;
+                    } elsif ($q_dirty && _input_pending(0.25)) {
+                        # more typing on the way: keep the stale preview, scan on pause
+                        if (@pv_stack) {
+                            _apply_match_rows($pv_stack[-1][1], $pv_stack[-1][2]);
+                            @f2 = @{ $pv_stack[-1][1] };
+                        }
+                    } else {
+                        my $base = @pv_stack ? $pv_stack[-1][1] : \@f2;
+                        my @hits = _fulltext_filter($base, $query);
+                        push @pv_stack, [$query, [@hits], _match_map(@hits)];
+                        @f2 = @hits;
+                        $q_dirty = 0;
+                    }
                 }
-                ($ROWS, $COLS) = _term_size();
+                _check_resize();
                 my $sort_col = $sort_cols[$sort_idx];
-                my @e2   = _build_entries(\@f2, $running, \%sel_ids, $grouped, $sort_col, $sort_rev);
-                my $n2   = scalar @e2;
+                my @e2   = _build_entries(\@f2, $running, \%sel_ids, $group_by, $sort_col, $sort_rev);
                 my $vis2 = $ROWS - 3 - 1;
-                my $cur2 = 0;
-                $cur2++ while $cur2 < $n2 - 1 && $e2[$cur2] && $e2[$cur2]{type} eq 'header';
-                _render(\@e2, $cur2, 0, $vis2, \%sel_ids, $grouped, $running,
+                ($cur2, $off2) = _clamp_list(\@e2, $cur2, $off2, $vis2);
+                _render(\@e2, $cur2, $off2, $vis2, \%sel_ids, $group_by, $running,
                     ($is_fulltext ? $filter : $query),
                     ($is_fulltext ? $query  : $fulltext),
-                    $sort_col, $sort_rev);
-                print "\033[${ROWS};1H\033[K";
-                my $hint = $is_fulltext ? ' (ENTER=search ESC=cancel)' : ' (ENTER=apply ESC=cancel)';
-                print $prompt . colored($query, 'bold white') . colored($hint, 'faint');
-                STDOUT->flush();
+                    $sort_col, $sort_rev, 0);
+                $draw_prompt->();
                 my $ch = _read_key();
                 if ($ch eq "\n" || $ch eq "\r") {
-                    if ($is_fulltext) { $fulltext = $query } else { $filter = $query }
-                    $cursor = 0; $offset = 0;
+                    if ($is_fulltext) {
+                        $fulltext = $query;
+                        # hand the preview's hits to the main loop's cache, so
+                        # applying the search doesn't rescan (preview ignores
+                        # $filter, so only when none is active)
+                        if (!$filter && @pv_stack && $pv_stack[-1][0] eq $query) {
+                            $ft_sig   = "\0$query\0$CASE_SENSITIVE";
+                            @ft_hits  = @{ $pv_stack[-1][1] };
+                            $ft_match = $pv_stack[-1][2];
+                        }
+                    } else {
+                        $filter = $query;
+                    }
+                    # the preview ignores the other active restriction, so the
+                    # selection only carries over when there is none
+                    my $other = $is_fulltext ? $filter : $fulltext;
+                    ($cursor, $offset) = $other ? (0, 0) : ($cur2, $off2);
                     last;
                 } elsif ($ch eq 'ESC') {
-                    last;  
+                    last;
+                } elsif ($ch eq 'UP') {
+                    $cur2 = _move_cursor(\@e2, $cur2, -1);
+                } elsif ($ch eq 'DOWN') {
+                    $cur2 = _move_cursor(\@e2, $cur2, +1);
+                } elsif ($ch eq 'ALT_c' || $ch eq 'ALT_C' || $ch eq "\t") {
+                    # case toggle can widen or narrow matches: rescan from scratch
+                    $CASE_SENSITIVE = !$CASE_SENSITIVE;
+                    @pv_stack = ();
+                    $draw_prompt->();
                 } elsif ($ch eq 'BACKSPACE' || $ch eq "\x7f" || $ch eq "\x08") {
                     $query = substr($query, 0, -1) if length($query);
+                    $cur2 = 0; $off2 = 0; $q_dirty = 1;
+                    $draw_prompt->();   # echo before the (possibly slow) rescan
                 } elsif (length($ch) == 1 && $ch ge ' ') {
                     $query .= $ch;
+                    $cur2 = 0; $off2 = 0; $q_dirty = 1;
+                    $draw_prompt->();
                 }
             }
         }
         elsif ($key eq 'ESC') {
-            if ($filter || $fulltext) {
+            if ($sort_mode) {
+                $sort_mode = 0;
+            } elsif ($filter || $fulltext) {
                 $filter = ''; $fulltext = '';
                 $cursor = 0; $offset = 0;
             } else {
-                _save_state({ selected => [keys %sel_ids], grouped => $grouped });
+                _save_state({ selected => [keys %sel_ids], grouped => $group_by });
                 last;
             }
         }
         elsif ($key eq 'q') {
-            _save_state({ selected => [keys %sel_ids], grouped => $grouped });
+            _save_state({ selected => [keys %sel_ids], grouped => $group_by });
             last;
         }
     }
@@ -341,12 +472,15 @@ sub _sorted {
     return @sorted;
 }
 sub _build_entries {
-    my ($sessions, $running, $sel_ids, $grouped, $sort_col, $sort_rev) = @_;
+    my ($sessions, $running, $sel_ids, $group_by, $sort_col, $sort_rev) = @_;
     $sort_col //= 'date';
     my @valid = grep { ref $_ eq 'HASH' } @$sessions;
-    if ($grouped) {
+    if ($group_by) {
+        my $group_key = $group_by eq 'agent'
+            ? sub { ref($_[0]{_adapter}) =~ s/.*:://r }
+            : sub { $_[0]{cwd} };
         my %by_dir;
-        push @{ $by_dir{$_->{cwd}} }, $_ for @valid;
+        push @{ $by_dir{$group_key->($_)} }, $_ for @valid;
         my %sorted_dir;
         for my $dir (keys %by_dir) {
             $sorted_dir{$dir} = [ _sorted($by_dir{$dir}, $sort_col, $sort_rev, $sel_ids, $running) ];
@@ -363,12 +497,18 @@ sub _build_entries {
         my @entries;
         for my $dir (@dirs) {
             push @entries, { type => 'header', label => $dir };
-            push @entries, map { { type => 'session', session => $_ } } @{ $sorted_dir{$dir} };
+            push @entries, _entry_rows(@{ $sorted_dir{$dir} });
         }
         return @entries;
     }
-    return map { { type => 'session', session => $_ } }
-               _sorted(\@valid, $sort_col, $sort_rev, $sel_ids, $running);
+    return _entry_rows(_sorted(\@valid, $sort_col, $sort_rev, $sel_ids, $running));
+}
+sub _entry_rows {
+    return map {
+        my $s = $_;
+        ({ type => 'session', session => $s },
+         map { { %$_, type => 'match' } } @{ $s->{_match} // [] });
+    } @_;
 }
 sub _truncate_path {
     my ($path, $width) = @_;
@@ -376,28 +516,142 @@ sub _truncate_path {
         ? '...' . substr($path, -($width - 3))
         : $path;
 }
+use constant MAX_MATCH_LINES => 3;
 sub _search_content {
     my ($session, $query) = @_;
-    return 1 if index(lc($session->{title}), lc($query)) >= 0;
-    return 1 if index(lc($session->{cwd}),   lc($query)) >= 0;
-    my $re = eval { qr/\Q$query\E/i } or return 0;
+    my ($title, $cwd, $q) = $CASE_SENSITIVE
+        ? ($session->{title}, $session->{cwd}, $query)
+        : (lc $session->{title}, lc $session->{cwd}, lc $query);
+    return {} if index($title, $q) >= 0;
+    return {} if index($cwd,   $q) >= 0;
+    my $re = _qr($query) or return undef;
     my @files;
     push @files, $session->{_file} if $session->{_file} && -f $session->{_file};
     if (my $dir = $session->{_dir}) {
         push @files, _find_jsonl_files($dir);
     }
+    @files = sort { ((stat($b))[9] // 0) <=> ((stat($a))[9] // 0) } @files;
+    my @rows;
+    my $found = 0;
     for my $file (@files) {
+        last if $found >= MAX_MATCH_LINES;
         open my $fh, '<', $file or next;
-        while (my $line = <$fh>) {
-            {
-                no warnings 'utf8';
-                $line = decode('UTF-8', $line, Encode::FB_DEFAULT);
-            }
-            if ($line =~ $re) { close $fh; return 1 }
+        my @lines;
+        while (my $l = <$fh>) {
+            no warnings 'utf8';
+            push @lines, decode('UTF-8', $l, Encode::FB_DEFAULT);
         }
         close $fh;
+        my @hits;
+        for (my $i = $#lines; $i >= 0; $i--) {
+            next unless $lines[$i] =~ $re;
+            push @hits, $i;
+            last if $found + @hits >= MAX_MATCH_LINES;
+        }
+        next unless @hits;
+        $found += @hits;
+        my %is_hit = map { $_ => 1 } @hits;
+        my @blocks;
+        for my $i (@hits) {
+            my ($lo, $hi) = ($i - 1, $i + 1);
+            $lo = 0       if $lo < 0;
+            $hi = $#lines if $hi > $#lines;
+            if (@blocks && $hi >= $blocks[-1][0] - 1) {
+                $blocks[-1][0] = $lo if $lo < $blocks[-1][0];
+            } else {
+                push @blocks, [$lo, $hi];
+            }
+        }
+        for my $b (@blocks) {
+            push @rows, { gap => 1 } if @rows;
+            for my $i ($b->[0] .. $b->[1]) {
+                if ($is_hit{$i} && $lines[$i] =~ $re) {
+                    my ($ms, $me) = ($-[0], $+[0]);
+                    push @rows, { matched => 1, time => _line_time($lines[$i]),
+                                  text => _match_snippet($lines[$i], $ms, $me) };
+                } else {
+                    push @rows, { matched => 0, time => _line_time($lines[$i]),
+                                  text => _ctx_snippet($lines[$i]) };
+                }
+            }
+        }
     }
-    return 0;
+    return @rows ? { rows => \@rows } : undef;
+}
+sub _clean_snippet {
+    my ($snip) = @_;
+    $snip =~ s/\\u([0-9a-fA-F]{4})/chr(hex($1))/ge;
+    $snip =~ s/\\[ntr]/ /g;
+    $snip =~ s/\\(["\\\/])/$1/g;
+    $snip =~ s/[\x00-\x1f]/ /g;
+    $snip =~ s/\s+/ /g;
+    $snip =~ s/^\s+|\s+$//g;
+    return $snip;
+}
+sub _match_snippet {
+    my ($line, $mstart, $mend) = @_;
+    chomp $line;
+    my $start = $mstart - 30;
+    $start = 0 if $start < 0;
+    my $len  = ($mend - $start) + 100;
+    my $snip = _clean_snippet(substr($line, $start, $len));
+    $snip = "\x{2026}$snip" if $start > 0;
+    $snip .= "\x{2026}"     if $start + $len < length($line);
+    return $snip;
+}
+sub _ctx_snippet {
+    my ($line) = @_;
+    my $text = $line;
+    for my $f (qw(text content message)) {
+        if ($line =~ /"$f"\s*:\s*"((?:[^"\\]|\\.)+)"/) { $text = $1; last }
+    }
+    $text = _clean_snippet($text);
+    $text = substr($text, 0, 130) . "\x{2026}" if length($text) > 130;
+    return $text;
+}
+sub _line_time {
+    my ($line) = @_;
+    if ($line =~ /"(?:timestamp|startTime|createdAt|time|date)"\s*:\s*"([^"]+)"/) {
+        my $t = $1;
+        if ($t =~ /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?/) {
+            my ($Y, $M, $D, $h, $m, $s, $tz) = ($1, $2, $3, $4, $5, $6 // 0, $7 // '');
+            my $epoch = eval {
+                $tz eq 'Z' ? Time::Local::timegm($s, $m, $h, $D, $M - 1, $Y)
+                           : Time::Local::timelocal($s, $m, $h, $D, $M - 1, $Y)
+            };
+            return POSIX::strftime('%Y-%m-%d %H:%M', localtime($epoch)) if defined $epoch;
+            return "$Y-$M-$D $h:$m";
+        }
+        return substr($t, 0, 16);
+    }
+    if ($line =~ /"(?:timestamp|time|created(?:At)?)"\s*:\s*(\d{10,13})(?:\.\d+)?/) {
+        my $e = $1;
+        $e = int($e / 1000) if length($e) > 11;
+        return POSIX::strftime('%Y-%m-%d %H:%M', localtime($e));
+    }
+    return '';
+}
+sub _apply_match_rows {
+    # cached hit lists share session hashes with later scans, which overwrite
+    # or delete _match; re-apply the rows that belong to the cached query
+    my ($sessions, $map) = @_;
+    for my $s (@$sessions) {
+        my $rows = $map->{$s->{id}};
+        if ($rows) { $s->{_match} = $rows } else { delete $s->{_match} }
+    }
+}
+sub _match_map {
+    my (@hits) = @_;
+    return { map { $_->{id} => $_->{_match} } grep { $_->{_match} } @hits };
+}
+sub _fulltext_filter {
+    my ($sessions, $query) = @_;
+    return grep {
+        my $m = _search_content($_, $query);
+        if ($m && $m->{rows}) { $_->{_match} = $m->{rows} }
+        else                  { delete $_->{_match} }
+        $m;
+    } @$sessions;
 }
 sub _find_jsonl_files {
     my ($dir) = @_;
@@ -429,8 +683,10 @@ sub _banner {
     return $art_str;
 }
 sub _render {
-    my ($entries, $cursor, $offset, $visible, $sel_ids, $grouped, $running, $filter, $fulltext, $sort_col, $sort_rev) = @_;
+    my ($entries, $cursor, $offset, $visible, $sel_ids, $group_by, $running, $filter, $fulltext, $sort_col, $sort_rev, $sort_mode) = @_;
     $sort_col //= 'date';
+    my $hide_path = $group_by eq 'path';
+    my $sort_hl = $sort_mode ? 'bold black on_yellow' : 'bold yellow';
     my $sort_arrow = $sort_rev ? "\x{2193}" : "\x{2191}";  
     my $n    = scalar @$entries;
     my $cols = $COLS;
@@ -439,13 +695,13 @@ sub _render {
     my $rel_w    = 8;   
     my $size_w   = 6;   
     my $id_w     = 8;
-    my $tag_w    = 5;   
+    my $tag_w    = 4;
     my $prefix_w = 4;   # ✔ and ● are each 2 terminal columns wide
-    my $sep_w    = 2;   
+    my $sep_w    = 1;
     my $has_sb   = $n > $visible ? 1 : 0;
     my $usable   = $COLS - $has_sb;
     my $path_w = 0;
-    unless ($grouped) {
+    unless ($hide_path) {
         my $max_path = 0;
         for my $e (@$entries) {
             next unless $e->{type} eq 'session';
@@ -471,21 +727,21 @@ sub _render {
     my $hdr_col = sub {
         my ($key, $label, $w) = @_;
         if ($sort_col eq $key) {
-            return colored("$label$sort_arrow", 'bold yellow') . ' ' x ($w - length($label) - 1);
+            return colored("$label$sort_arrow", $sort_hl) . ' ' x ($w - length($label) - 1);
         }
         return sprintf "%-${w}s", $label;
     };
-    my $sel_mark_hdr = $sort_col eq 'selected' ? colored("\x{2714}", 'bold yellow') : "\x{2714}";
-    my $run_mark_hdr = $sort_col eq 'running'  ? colored("\x{25cf}", 'bold yellow') : "\x{25cf}";
-    my $hdr = $grouped
-        ? sprintf("%s %s   %s%s  %s  %s %s",
+    my $sel_mark_hdr = $sort_col eq 'selected' ? colored("\x{2714}", $sort_hl) : "\x{2714}";
+    my $run_mark_hdr = $sort_col eq 'running'  ? colored("\x{25cf}", $sort_hl) : "\x{25cf}";
+    my $hdr = $hide_path
+        ? sprintf("%s %s   %s%s %s %s %s",
             $sel_mark_hdr, $run_mark_hdr,
             $hdr_col->('agent',   'Agt',     $tag_w),
             $hdr_col->('date',    'When',    $rel_w),
             $hdr_col->('size',    'Size',    $size_w),
             $hdr_col->('session', 'Session', $id_w),
             $hdr_col->('title',   'Title',   $title_w))
-        : sprintf("%s %s   %s%s  %s  %s  %s %s",
+        : sprintf("%s %s   %s%s %s %s %s %s",
             $sel_mark_hdr, $run_mark_hdr,
             $hdr_col->('agent',   'Agt',     $tag_w),
             $hdr_col->('date',    'When',    $rel_w),
@@ -509,6 +765,28 @@ sub _render {
                 : _str_boldyel($line)) . "\n";
             next;
         }
+        if ($entry->{type} eq 'match') {
+            if ($entry->{gap}) {
+                $frame .= '     ' . _str_dim("\x{22ee}") . "\033[K\n";
+                next;
+            }
+            my $time = sprintf '%-16s', ($entry->{time} // '');
+            my $maxw = $usable - 25;
+            $maxw = 10 if $maxw < 10;
+            my $text = substr($entry->{text} // '', 0, $maxw);
+            if ($entry->{matched}) {
+                if ($fulltext) {
+                    my $re = _qr($fulltext);
+                    $text =~ s/$re/colored($1, 'black on_yellow')/ge if $re;
+                }
+                $frame .= '     ' . _str_dim("\x{21b3} $time  ")
+                       . _col_white . $text . RESET . "\033[K\n";
+            } else {
+                $frame .= '     ' . color('faint') . "\x{2502} $time  " . $text
+                       . RESET . "\033[K\n";
+            }
+            next;
+        }
         my $session    = $entry->{session};
         my $is_sel     = $sel_ids->{ $session->{id} };
         my $is_running = $running->{  $session->{id} };
@@ -520,14 +798,14 @@ sub _render {
         my $size  = sprintf "%-${size_w}s",  _fmt_size($session->{_size} // 0);
         my $id    = sprintf "%-${id_w}s",    substr($session->{id}, 0, $id_w);
         my $raw_title = substr($session->{title}, 0, $title_w);
-        my $raw_path  = $grouped ? '' : _truncate_path($session->{cwd}, $path_w);
+        my $raw_path  = $hide_path ? '' : _truncate_path($session->{cwd}, $path_w);
         if ($filter && !$active) {
-            my $re = eval { qr/(\Q$filter\E)/i } // qr/(?!)/;
+            my $re = _qr($filter) // qr/(?!)/;
             $raw_title =~ s/$re/colored($1, 'bold reverse')/ge;
-            $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $grouped;
+            $raw_path  =~ s/$re/colored($1, 'bold reverse')/ge unless $hide_path;
         }
         my $title    = sprintf "%-${title_w}s", $raw_title;
-        my $path_sep = $grouped ? '' : $raw_path . ' ';
+        my $path_sep = $hide_path ? '' : $raw_path . ' ';
         my $row;
         my $bg = $active && $is_sel ? color('bold white on_magenta')
                : $active            ? _col_active
@@ -536,17 +814,17 @@ sub _render {
         if ($bg) {
             $row = $bg . $sel_mark . ' '
                  . ($is_running ? _col_boldgrn . $running_bullet . $bg : ' ') . ' '
-                 . "$tag  $when  $size  $id  $path_sep$title"
+                 . "$tag $when $size $id $path_sep$title"
                  . RESET;
         } else {
-            my $path_part = $grouped ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . ' ';
+            my $path_part = $hide_path ? '' : _col_green . _truncate_path($session->{cwd}, $path_w) . ' ';
             my $title_col = $no_title ? color('faint') : _col_white;
             $row = $sel_mark . ' '
                  . ($is_running ? _col_boldgrn . $running_bullet . RESET : ' ') . ' '
-                 . $tag . RESET . '  '
-                 . _col_yellow . $when . '  '
-                 . _col_cyan   . $size . '  '
-                 . _col_cyan   . $id   . '  '
+                 . $tag . RESET . ' '
+                 . _col_yellow . $when . ' '
+                 . _col_cyan   . $size . ' '
+                 . _col_cyan   . $id   . ' '
                  . $path_part
                  . $title_col  . $title
                  . RESET;
@@ -564,65 +842,21 @@ sub _render {
         }
     }
     my $nsel        = scalar keys %$sel_ids;
-    my $toggle_mode = $grouped ? 'flat' : 'grouped';  
+    my $toggle_mode = $group_by eq ''     ? 'by path'
+                    : $group_by eq 'path' ? 'by agent'
+                    :                       'flat';
     my $pct         = $n > $visible ? sprintf(' %d%%', int(($offset + $visible/2) / $n * 100)) : '';
-    my $footer = sprintf(
-        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] →%s  [s]ort:%s  [r]efresh  [/] filter  [?] search  [a] all  [c] clear  [q]uit   %d sel/%d%s%s',
-        $toggle_mode, $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct,
+    my $footer = $sort_mode
+        ? sprintf('[←→] sort column  [↑↓] direction  [s/ENTER/ESC] done   sorting: %s   %d/%d%s',
+            $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct)
+        : sprintf(
+        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] %s  [s]ort  [r]efresh  [/] filter  [?] search  [a] all  [c] clear  [q]uit   %d/%d%s%s',
+        $toggle_mode, $nsel, $n, $pct,
         ($filter   ? colored("  /filter: $filter",     'bold cyan')   : '')
       . ($fulltext ? colored("  ?search: $fulltext",   'bold yellow') : ''));
     $frame .= colored(substr($footer . ' ' x $cols, 0, $cols - 1), 'white on_blue');
     print $frame;
     STDOUT->flush();
-}
-sub _sort_popup {
-    my ($sort_cols, $current_idx, $reverse) = @_;
-    my @labels = (
-        "selected  (\x{2714})",
-        'running   (●)',
-        'agent',
-        'date',
-        'size',
-        'session',
-        'path',
-        'title',
-    );
-    my $pick   = $current_idx;
-    my $dir    = $reverse ? "\x{2193} descending" : "\x{2191} ascending";
-    my $footer_text = ' [↑↓] move  [ENTER] ok  [ESC] cancel ';
-    my $title_text  = " Sort $dir ";
-    my $max_label = (sort { $b <=> $a } map { length } @labels)[0];
-    my $w = (sort { $b <=> $a } length($title_text), length($footer_text), $max_label + 4)[0];
-    while (1) {
-        ($ROWS, $COLS) = _term_size();
-        my $h    = scalar(@labels) + 4;
-        my $top  = int(($ROWS - $h) / 2);
-        my $left = int(($COLS - $w) / 2);
-        my $popup = '';
-        my $pad   = int(($w - length($title_text)) / 2);
-        $popup .= "\033[${top};${left}H" . colored(' ' x $w, 'white on_blue');
-        $popup .= "\033[" . ($top+1) . ";${left}H"
-               . colored(' ' x $pad . $title_text . ' ' x ($w - $pad - length($title_text)), 'bold white on_blue');
-        $popup .= "\033[" . ($top+2) . ";${left}H" . colored(' ' x $w, 'white on_blue');
-        for my $i (0 .. $#labels) {
-            my $row   = $top + 3 + $i;
-            my $label = sprintf " %-*s ", $w - 2, $labels[$i];
-            $popup .= "\033[${row};${left}H";
-            $popup .= $i == $pick
-                ? colored($label, 'black on_cyan')
-                : colored($label, 'white on_blue');
-        }
-        my $footer_row = $top + 3 + scalar @labels;
-        my $footer = sprintf "%-*s", $w, $footer_text;
-        $popup .= "\033[${footer_row};${left}H" . colored($footer, 'faint on_blue');
-        print $popup;
-        STDOUT->flush();
-        my $key = _read_key();
-        if    ($key eq 'UP'   || $key eq 'k') { $pick = ($pick - 1 + @labels) % @labels }
-        elsif ($key eq 'DOWN' || $key eq 'j') { $pick = ($pick + 1)           % @labels }
-        elsif ($key eq "\n"   || $key eq "\r") { return $pick }
-        elsif ($key eq 'ESC'  || $key eq 'q')  { return undef }
-    }
 }
 sub _confirm {
     my ($prompt) = @_;
