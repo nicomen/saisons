@@ -23,6 +23,13 @@ WriteMakefile(
     },
     META_MERGE => {
         'meta-spec' => { version => 2 },
+        prereqs     => {
+            develop => {
+                requires => {
+                    'App::SlimPacker' => 0,    # provides slimpack, used by `make fatpack`
+                },
+            },
+        },
         resources   => {
             repository => {
                 type => 'git',
