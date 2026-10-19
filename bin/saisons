@@ -5,6 +5,8 @@ use utf8;
 use open qw(:utf8);
 binmode STDOUT, ':utf8';
 binmode STDERR, ':utf8';
+# Windows has no HOME; normalize once so every "$ENV{HOME}/..." below works
+BEGIN { $ENV{HOME} //= $ENV{USERPROFILE} // '' }
 use lib "$ENV{HOME}/.local/lib";
 use lib 'lib';
 use Module::Pluggable (
