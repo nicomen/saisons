@@ -97,7 +97,8 @@ sub _read_key {
         last if _input_pending(0.5);
     }
     my $c = '';
-    sysread STDIN, $c, 1;
+    my $n = sysread STDIN, $c, 1;
+    return 'EOF' unless $n;   # closed/hung-up stdin must not busy-loop
     if ($c eq "\033") {
         my $rin = '';
         vec($rin, fileno(STDIN), 1) = 1;
@@ -406,7 +407,7 @@ sub interactive_select {
                     my $other = $is_fulltext ? $filter : $fulltext;
                     ($cursor, $offset) = $other ? (0, 0) : ($cur2, $off2);
                     last;
-                } elsif ($ch eq 'ESC') {
+                } elsif ($ch eq 'ESC' || $ch eq 'EOF') {
                     last;
                 } elsif ($ch eq 'UP') {
                     $cur2 = _move_cursor(\@e2, $cur2, -1);
@@ -439,7 +440,7 @@ sub interactive_select {
                 last;
             }
         }
-        elsif ($key eq 'q') {
+        elsif ($key eq 'q' || $key eq 'EOF') {
             _save_state({ selected => [keys %sel_ids], grouped => $group_by });
             last;
         }
@@ -957,7 +958,7 @@ sub _peek {
             while (1) {
                 my $ch = _read_key();
                 if ($ch eq "\n" || $ch eq "\r") { last }
-                elsif ($ch eq 'ESC')             { $q = $search; last }
+                elsif ($ch eq 'ESC' || $ch eq 'EOF') { $q = $search; last }
                 elsif ($ch eq 'BACKSPACE' || $ch eq "\x7f" || $ch eq "\x08") {
                     $q = substr($q, 0, -1) if length($q);
                 } elsif (length($ch) == 1 && $ch ge ' ') {
@@ -980,7 +981,7 @@ sub _peek {
                 $offset = $match_lines[$match_idx];
             }
         }
-        elsif ($key eq 'q' || $key eq 'ESC')  { last }
+        elsif ($key eq 'q' || $key eq 'ESC' || $key eq 'EOF') { last }
     }
     _restore_term();
     print "\033[?25h";
