@@ -1,0 +1,51 @@
+name: Install scripts
+
+on:
+  push:
+    branches: [main]
+    paths: ['install.sh', 'install.ps1', 'saisons', '.github/workflows/install.yml']
+  pull_request:
+    paths: ['install.sh', 'install.ps1', 'saisons', '.github/workflows/install.yml']
+  schedule:
+    - cron: '14 6 * * 1'   # weekly: catches rot in the published script
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.sh
+        run: sh install.sh
+      - name: Verify installed script
+        run: |
+          dest=''
+          for dir in "$HOME/.local/bin" "$HOME/bin" /usr/local/bin; do
+            if [ -x "$dir/saisons" ]; then dest="$dir/saisons"; break; fi
+          done
+          if [ -z "$dest" ]; then
+            echo "saisons not found in any install directory" >&2
+            exit 1
+          fi
+          echo "installed at: $dest"
+          "$dest" --version | grep -E '^saisons [0-9]'
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.ps1
+        shell: powershell
+        run: .\install.ps1
+      - name: Verify installed script
+        shell: powershell
+        run: |
+          $cmd = Join-Path $env:USERPROFILE 'bin\saisons.cmd'
+          if (-not (Test-Path $cmd)) { throw "saisons.cmd not found" }
+          $out = & $cmd --version
+          Write-Host "version output: $out"
+          if ($out -notmatch '^saisons \d') { throw "unexpected version output: $out" }
