@@ -1,0 +1,12 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  environments:
+    uses: nicomen/App-SlimPacker/.github/workflows/perl-matrix.yml@main
