@@ -19,7 +19,8 @@ WriteMakefile(
         'POSIX'             => 0,
     },
     TEST_REQUIRES => {
-        'Test::More' => 0,
+        'Test::More'            => 0,
+        'File::Copy::Recursive' => 0,
     },
     META_MERGE => {
         'meta-spec' => { version => 2 },
