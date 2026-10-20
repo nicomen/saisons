@@ -1,0 +1,172 @@
+# Reusable CPAN-smoker-style test matrix for Perl distributions.
+#
+# Covers the environments that show up on CPAN Testers: Linux across old and
+# modern perls, FreeBSD and Solaris with their stock perls, and Cygwin.
+# Every job runs `cpanm --installdeps`, then `perl Makefile.PL && make &&
+# make test`, like the smokers do.
+#
+# Use it from another repository:
+#
+#   jobs:
+#     environments:
+#       uses: nicomen/App-SlimPacker/.github/workflows/perl-matrix.yml@main
+#       with:
+#         extra-modules: Moo    # optional test deps your suite can use
+#
+# or copy this file and call it locally with
+# `uses: ./.github/workflows/perl-matrix.yml`.
+
+name: Perl environment matrix
+
+on:
+  workflow_call:
+    inputs:
+      perl-versions:
+        description: JSON array of perl versions for the Linux matrix
+        type: string
+        default: '["5.10","5.12","5.14","5.16","5.18","5.20","5.22","5.24","5.26","5.32","5.36","5.40","5.44"]'
+      freebsd-releases:
+        description: JSON array of FreeBSD releases ("[]" disables the job)
+        type: string
+        default: '["14.3","15.0"]'
+      extra-modules:
+        description: Space-separated CPAN modules to install beyond declared deps
+        type: string
+        default: ''
+      cygwin:
+        description: Run the Cygwin job
+        type: boolean
+        default: true
+      solaris:
+        description: Run the Solaris job
+        type: boolean
+        default: true
+
+env:
+  AUTOMATED_TESTING: 1
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        perl: ${{ fromJSON(inputs.perl-versions) }}
+
+    name: Linux perl ${{ matrix.perl }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+
+      - name: Install dependencies
+        run: |
+          # old perls bundle an ExtUtils::MakeMaker too old to write MYMETA,
+          # which leaves `cpanm --installdeps` with nothing to install
+          cpanm --notest ExtUtils::MakeMaker
+          cpanm --notest --installdeps .
+          mods='${{ inputs.extra-modules }}'
+          [ -z "$mods" ] || cpanm --notest $mods
+
+      - name: Build and test
+        run: |
+          perl Makefile.PL
+          make
+          make test
+
+  freebsd:
+    if: ${{ inputs.freebsd-releases != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(inputs.freebsd-releases) }}
+
+    name: FreeBSD ${{ matrix.release }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: ${{ matrix.release }}
+          usesh: true
+          prepare: |
+            pkg install -y perl5 p5-App-cpanminus
+          run: |
+            set -e
+            cpanm --notest --installdeps .
+            mods='${{ inputs.extra-modules }}'
+            [ -z "$mods" ] || cpanm --notest $mods
+            perl Makefile.PL
+            make
+            make test
+
+  cygwin:
+    if: ${{ inputs.cygwin }}
+    runs-on: windows-latest
+    name: Cygwin perl
+
+    env:
+      CYGWIN: winsymlinks:native
+
+    steps:
+      - name: Keep LF line endings on checkout
+        run: git config --global core.autocrlf input
+        shell: bash
+
+      - uses: actions/checkout@v6
+
+      - name: Set up Cygwin
+        uses: cygwin/cygwin-install-action@v4
+        with:
+          packages: perl make gcc-core gcc-g++ curl libcrypt-devel libnsl-devel cygwin-devel
+
+      - name: Install dependencies and test
+        shell: C:\cygwin\bin\bash.exe --login -o igncr '{0}'
+        run: |
+          set -e
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          curl -fsSL https://cpanmin.us -o /tmp/cpanm
+          perl /tmp/cpanm --notest --installdeps . || {
+            echo '===== cpanm build.log(s) ====='
+            cat "$HOME"/.cpanm/work/*/build.log
+            exit 1
+          }
+          mods='${{ inputs.extra-modules }}'
+          [ -z "$mods" ] || perl /tmp/cpanm --notest $mods
+          perl Makefile.PL
+          make
+          make test
+
+  solaris:
+    if: ${{ inputs.solaris }}
+    runs-on: ubuntu-latest
+    name: Solaris 11.4
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test on Solaris
+        uses: vmactions/solaris-vm@v1
+        with:
+          release: '11.4-gcc'
+          usesh: true
+          prepare: |
+            curl -fsSL https://cpanmin.us -o /tmp/cpanm
+          run: |
+            set -e
+            # Solaris tar mishandles pax headers in some CPAN tarballs;
+            # put GNU tar first
+            PATH=/usr/gnu/bin:$PATH; export PATH
+            perl /tmp/cpanm --notest --installdeps .
+            mods='${{ inputs.extra-modules }}'
+            [ -z "$mods" ] || perl /tmp/cpanm --notest $mods
+            perl Makefile.PL
+            make
+            make test

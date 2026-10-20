@@ -9,4 +9,4 @@ on:
 
 jobs:
   environments:
-    uses: nicomen/App-SlimPacker/.github/workflows/perl-matrix.yml@main
+    uses: ./.github/workflows/perl-matrix.yml
