@@ -241,7 +241,9 @@ sub interactive_select {
         }
         elsif ($key eq "\n" || $key eq "\r") {
             if ($sort_mode) { $sort_mode = 0; next }
-            my @to_open = _selected_sessions(\%sel_ids, $sessions);
+            # resolve against the visible list: a filter or search must hide
+            # selections made outside it from bulk actions
+            my @to_open = _selected_sessions(\%sel_ids, \@filtered);
             unless (@to_open) {
                 my $e = $entries[$cursor];
                 push @to_open, $e->{session} if $e && $e->{type} eq 'session';
@@ -308,7 +310,7 @@ sub interactive_select {
             }
         }
         elsif ($key eq 'd' || $key eq 'DELETE') {
-            my @to_del = _selected_sessions(\%sel_ids, $sessions);
+            my @to_del = _selected_sessions(\%sel_ids, \@filtered);
             unless (@to_del) {
                 my $e = $entries[$cursor];
                 push @to_del, $e->{session} if $e && $e->{type} eq 'session';
@@ -320,7 +322,7 @@ sub interactive_select {
             }
         }
         elsif ($key eq 'm') {
-            my @to_move = _selected_sessions(\%sel_ids, $sessions);
+            my @to_move = _selected_sessions(\%sel_ids, \@filtered);
             if (@to_move) {
                 my @already_running = grep { $running->{ $_->{id} } } @to_move;
                 if (@already_running) {
