@@ -480,7 +480,7 @@ sub _build_entries {
     my @valid = grep { ref $_ eq 'HASH' } @$sessions;
     if ($group_by) {
         my $group_key = $group_by eq 'agent'
-            ? sub { ref($_[0]{_adapter}) =~ s/.*:://r }
+            ? sub { _short_class(ref $_[0]{_adapter}) }
             : sub { $_[0]{cwd} };
         my %by_dir;
         push @{ $by_dir{$group_key->($_)} }, $_ for @valid;
@@ -1031,9 +1031,15 @@ sub _do_move {
     }
     print "Press Enter..."; <STDIN>;
 }
+# last component of a class name; s///r needs perl >= 5.14, we support 5.10
+sub _short_class {
+    my ($class) = @_;
+    $class =~ s/.*:://;
+    return $class;
+}
 sub _adapter_tag {
     my ($adapter, $active_or_sel) = @_;
-    my $label = $adapter->can('tag')       ? $adapter->tag       : substr(ref($adapter) =~ s/.*:://r, 0, 5);
+    my $label = $adapter->can('tag')       ? $adapter->tag       : substr(_short_class(ref $adapter), 0, 5);
     my $col   = $adapter->can('tag_color') ? $adapter->tag_color : undef;
     return ($col && !$active_or_sel) ? colored($label, $col) : $label;
 }

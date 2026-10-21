@@ -19,7 +19,7 @@ WriteMakefile(
         'POSIX'             => 0,
     },
     TEST_REQUIRES => {
-        'Test::More'            => 0,
+        'Test::More'            => '0.96',    # subtest
         'File::Copy::Recursive' => 0,
     },
     META_MERGE => {

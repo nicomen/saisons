@@ -144,7 +144,8 @@ sub _make_session {
         $epoch           & 0xFFFF,
         $epoch);
     my ($title) = grep { /^#### / } @$lines;
-    $title = $title ? $title =~ s/^#### //r : "(no messages)";
+    $title = "(no messages)" unless $title;
+    $title =~ s/^#### //;
     my $size = length(join "\n", @$lines);
     return {
         id       => $id,
