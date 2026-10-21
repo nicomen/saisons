@@ -17,6 +17,8 @@ WriteMakefile(
         'Term::ANSIColor'   => 0,
         'Module::Pluggable' => 0,
         'POSIX'             => 0,
+        'Encode'            => 0,
+        'Time::Local'       => 0,
     },
     TEST_REQUIRES => {
         'Test::More'            => '0.96',    # subtest

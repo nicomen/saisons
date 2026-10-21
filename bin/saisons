@@ -73,3 +73,68 @@ while (1) {
         $group->[0]{_adapter}->launch($group, $launcher);
     }
 }
+
+__END__
+
+=head1 NAME
+
+saisons - browse and resume AI coding agent sessions from one list
+
+=head1 SYNOPSIS
+
+    saisons
+    saisons --version
+
+=head1 DESCRIPTION
+
+saisons lists the coding agent sessions it finds on the machine - Claude
+Code, OpenAI Codex, Gemini CLI, Aider and opencode - in one terminal UI.
+The list shows each session's agent, age, size, path and title, and can be
+filtered, searched full-text, grouped and sorted.
+
+Pressing ENTER resumes the selected sessions by running each agent's
+resume command in the session's directory: in a new tmux or screen window,
+a new terminal tab, or inline in the current terminal, depending on the
+environment.
+
+=head1 KEYS
+
+    Up/Down, j/k     move            /        filter (title, path, date)
+    PgUp/PgDn        page            ?        full-text search
+    Home/End, g/G    top / bottom    Alt+C    toggle case sensitivity
+    Space            toggle select   s        sort mode (arrows pick)
+    a / A            select all/none S        flip sort direction
+    ENTER            open selected   t        cycle grouping
+    v                view history    r        refresh running markers
+    d                delete          m        move to other directory
+    q / ESC          quit
+
+With a filter or search active, ENTER, delete and move act only on the
+selected sessions it shows.
+
+=head1 ENVIRONMENT
+
+=over 4
+
+=item SAISONS_LAUNCHER
+
+Where selected sessions open: C<tmux>, C<screen>, C<gnome-terminal>,
+C<iterm>, C<terminal-app> or C<inline>. Without it, saisons picks one from
+the environment. The old name C<CLAUDE_SESSIONS_LAUNCHER> still works.
+
+=item SAISONS_SEARCH_DIRS
+
+Colon-separated directories to scan for Aider history files, instead of
+the default project directories.
+
+=back
+
+=head1 AUTHOR
+
+Nicolas Mendoza E<lt>mendoza@pvv.ntnu.noE<gt>
+
+=head1 LICENSE
+
+This software is licensed under the Artistic License 2.0.
+
+=cut

@@ -9,3 +9,29 @@ sub version_string {
     return $VERSION . ' (' . ($main::SAISONS_BUILD // 'dev') . ')';
 }
 1;
+
+__END__
+
+=head1 NAME
+
+App::Saisons - terminal UI for browsing and resuming AI coding agent sessions
+
+=head1 DESCRIPTION
+
+App::Saisons implements the L<saisons> command: one list of all the AI
+coding agent sessions on the machine - Claude Code, OpenAI Codex, Gemini
+CLI, Aider and opencode. Sessions can be filtered, searched, grouped and
+sorted, and selected ones resume in a new tmux window, terminal tab or the
+current terminal.
+
+See L<saisons> for usage, keys and configuration.
+
+=head1 AUTHOR
+
+Nicolas Mendoza E<lt>mendoza@pvv.ntnu.noE<gt>
+
+=head1 LICENSE
+
+This software is licensed under the Artistic License 2.0.
+
+=cut

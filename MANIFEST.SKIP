@@ -11,3 +11,11 @@
 ^saisons-bundle$
 ^fatlib/
 ^fatpacker\.trace$
+^saisons$
+^install\.sh$
+^install\.ps1$
+^\.github/
+^docs/
+^MANIFEST\.bak$
+^App-Saisons-[0-9.]+/
+^App-Saisons-.*\.tar\.gz$
