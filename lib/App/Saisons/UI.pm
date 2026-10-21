@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use utf8;
 use POSIX qw();
+use App::Saisons;
 use Term::ANSIColor qw(colored color);
 use JSON::PP ();
 use Encode qw(decode);
@@ -680,7 +681,7 @@ sub _banner {
     my @letters = split //, "\x{FF33}\x{FF21}\x{FF29}\x{FF33}\x{FF2F}\x{FF2E}\x{FF33}";
     my @colors  = ('bold red', 'bold yellow', 'bold green', 'bold cyan', 'bold blue', 'bold magenta', 'bold red');
     my $title   = join '', map { colored($letters[$_], $colors[$_]) } 0..$#letters;
-    my $author      = "v$App::Saisons::VERSION  by Nicolas Mendoza  \x{00a9} 2026";
+    my $author      = 'v' . App::Saisons::version_string() . "  by Nicolas Mendoza  \x{00a9} 2026";
     my $title_vis   = scalar @letters * 2;  
     my $pad         = $cols - $title_vis - length($author);
     $pad = 2 if $pad < 2;

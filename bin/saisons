@@ -18,7 +18,7 @@ use App::Saisons;
 use App::Saisons::UI;
 
 if (@ARGV && $ARGV[0] eq '--version') {
-    print "saisons $App::Saisons::VERSION\n";
+    print 'saisons ' . App::Saisons::version_string() . "\n";
     exit 0;
 }
 

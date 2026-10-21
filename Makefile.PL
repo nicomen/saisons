@@ -49,7 +49,8 @@ sub postamble {
     return <<'MAKE';
 fatpack: bin/saisons
 	slimpack -o saisons bin/saisons
-	@echo "saisons is now fatpacked and minified — ready to commit"
+	perl -0777 -i -pe 'my $$b = `git describe --always`; $$b =~ s/\s+\z//; $$b .= "-dirty" if `git status --porcelain -- bin lib` =~ /\S/; s/\n/\nBEGIN{\$$main::SAISONS_BUILD=q{$$b}}\n/' saisons
+	@echo "saisons is now fatpacked, minified and stamped — ready to commit"
 
 MAKE
 }
