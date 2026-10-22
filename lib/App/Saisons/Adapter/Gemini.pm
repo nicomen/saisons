@@ -2,7 +2,8 @@ package App::Saisons::Adapter::Gemini;
 use strict;
 use warnings;
 use JSON::PP ();
-use POSIX qw();
+use Time::Local ();
+use App::Saisons ();
 use App::Saisons::Launcher ();
 sub new { bless {}, shift }
 sub name      { 'Gemini' }
@@ -74,11 +75,8 @@ sub _parse_session {
             if (my $ts = $obj->{startTime} // $obj->{lastUpdated}) {
                 if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
                     $date_str = "$1-$2-$3T$4:$5:$6";
-                    local $ENV{TZ} = 'UTC';
-                    POSIX::tzset();
-                    $epoch = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900);
-                    delete $ENV{TZ};
-                    POSIX::tzset();
+                    # not POSIX::tzset: it is unimplemented on Windows
+                    $epoch = Time::Local::timegm($6, $5, $4, $3, $2 - 1, $1);
                 }
             }
             $cwd = $ENV{HOME};

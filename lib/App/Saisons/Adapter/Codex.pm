@@ -1,6 +1,7 @@
 package App::Saisons::Adapter::Codex;
 use strict;
 use warnings;
+use App::Saisons ();
 use JSON::PP ();
 use POSIX qw();
 use App::Saisons::Launcher ();

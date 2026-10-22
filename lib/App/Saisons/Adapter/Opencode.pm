@@ -1,6 +1,7 @@
 package App::Saisons::Adapter::Opencode;
 use strict;
 use warnings;
+use App::Saisons ();
 use JSON::PP ();
 use POSIX qw();
 use Encode qw(decode);

@@ -1,6 +1,7 @@
 package App::Saisons::Adapter::Aider;
 use strict;
 use warnings;
+use App::Saisons ();
 use POSIX qw();
 use App::Saisons::Launcher ();
 sub new { bless {}, shift }

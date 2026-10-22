@@ -1,5 +1,11 @@
 Revision history for App-Saisons
 
+0.2.1  2026-10-22
+    - Fix: reading Gemini sessions no longer dies on Windows, where
+      POSIX::tzset is unimplemented.
+    - Fix: no HOME warnings on Windows when the modules are loaded
+      directly, not just through the saisons command.
+
 0.2.0  2026-10-22
     - New: running-session markers refresh by themselves every few
       seconds; r still forces it.
