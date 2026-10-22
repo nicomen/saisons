@@ -42,6 +42,16 @@ sub _save_state {
     print $fh JSON::PP::encode_json($state);
     close $fh;
 }
+use constant REFRESH_RUNNING_EVERY => 5;   # seconds between ● marker refreshes
+sub _refresh_running {
+    my ($sessions, $running) = @_;
+    my %seen;
+    %$running = ();
+    for my $s (@$sessions) {
+        next if $seen{ref $s->{_adapter}}++;
+        %$running = (%$running, $s->{_adapter}->running);
+    }
+}
 my ($OLD_TERM, $ROWS, $COLS);
 my $RESIZED = 0;
 my $CASE_SENSITIVE = 0;
@@ -93,8 +103,10 @@ sub _input_pending {
 sub _read_key {
     # wait in select() so SIGWINCH interrupts us; a blocked sysread would
     # be restarted (SA_RESTART) and the resize would go unnoticed
+    my ($deadline) = @_;
     while (1) {
         if ($RESIZED) { $RESIZED = 0; return 'RESIZE' }
+        return 'TICK' if defined $deadline && time >= $deadline;
         last if _input_pending(0.5);
     }
     my $c = '';
@@ -189,6 +201,7 @@ sub interactive_select {
     local $SIG{WINCH} = sub { $RESIZED = 1 };
     print "\033[?25l";  
     my @result;
+    my $next_refresh = time + REFRESH_RUNNING_EVERY;
     while (1) {
         _check_resize();
         my @filtered = grep { ref $_ eq 'HASH' } @$sessions;
@@ -218,7 +231,7 @@ sub interactive_select {
         my $visible = $ROWS - 3 - 1;
         ($cursor, $offset) = _clamp_list(\@entries, $cursor, $offset, $visible);
         _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $group_by, $running, $filter, $fulltext, $sort_col, $sort_rev, $sort_mode);
-        my $key = _read_key();
+        my $key = _read_key($next_refresh);
         if ($key eq 'UP' || $key eq 'k') {
             if ($sort_mode && $key eq 'UP') { $sort_rev = 0; $cursor = 0; $offset = 0 }
             else { $cursor = _move_cursor(\@entries, $cursor, -1) }
@@ -294,13 +307,9 @@ sub interactive_select {
         elsif ($key eq "\x0c") {  # Ctrl+L: force full repaint
             print "\033[2J";
         }
-        elsif ($key eq 'r') {
-            my %seen;
-            %$running = ();
-            for my $s (@$sessions) {
-                next if $seen{ref $s->{_adapter}}++;
-                %$running = (%$running, $s->{_adapter}->running);
-            }
+        elsif ($key eq 'r' || $key eq 'TICK') {
+            _refresh_running($sessions, $running);
+            $next_refresh = time + REFRESH_RUNNING_EVERY;
         }
         elsif ($key eq 'v') {
             my $e = $entries[$cursor];

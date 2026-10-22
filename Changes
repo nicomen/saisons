@@ -1,6 +1,8 @@
 Revision history for App-Saisons
 
-0.2.0  2026-10-21
+0.2.0  2026-10-22
+    - New: running-session markers refresh by themselves every few
+      seconds; r still forces it.
     - New: the list redraws itself on terminal resize; Ctrl+L forces a
       full repaint.
     - New: inline sort mode — press s, pick the column with left/right and
