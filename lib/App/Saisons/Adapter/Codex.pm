@@ -17,7 +17,8 @@ sub find_sessions {
     my @files = _find_session_files($sessions_dir);
     my @sessions;
     for my $file (@files) {
-        my $s = _parse_session($file, $self) or next;
+        my ($s) = App::Saisons::cached_parse($file, sub { _parse_session($file, $self) });
+        next unless $s;
         push @sessions, $s;
     }
     return @sessions;

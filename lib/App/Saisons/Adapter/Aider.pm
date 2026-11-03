@@ -26,7 +26,8 @@ sub find_sessions {
     my @sessions;
     for my $file (@history_files) {
         (my $cwd = $file) =~ s|/\.aider\.chat\.history\.md$||;
-        push @sessions, _parse_history_file($file, $cwd, $self);
+        push @sessions,
+            App::Saisons::cached_parse($file, sub { _parse_history_file($file, $cwd, $self) });
     }
     return @sessions;
 }

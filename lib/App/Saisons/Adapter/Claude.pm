@@ -37,7 +37,8 @@ sub find_sessions {
         for my $file (sort readdir $pdh) {
             next unless $file =~ /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
             my $id = $1;
-            my ($title, $date, $epoch, $cwd, $first_msg) = _extract_meta("$dir/$file");
+            my ($title, $date, $epoch, $cwd, $first_msg) =
+                App::Saisons::cached_parse("$dir/$file", sub { _extract_meta("$dir/$file") });
             $cwd //= _derive_path($project);
             $title //= $running_names{$id} // $first_msg // '(no title)';
             my $size = -s "$dir/$file" // 0;
@@ -158,7 +159,6 @@ sub load_messages {
 sub _extract_meta {
     my ($file) = @_;
     my ($title, $date, $epoch, $cwd, $first_msg) = (undef, '0000-00-00', 0, undef, undef);
-    print STDERR "\033[2KLoading $file ...\r";
     open my $fh, '<:utf8', $file or return ($title, $date, $epoch, $cwd);
     while (<$fh>) {
         $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
@@ -180,7 +180,6 @@ sub _extract_meta {
         }
     }
     close $fh;
-    print STDERR "\033[2K\r";
     return ($title, $date, $epoch, $cwd, $first_msg);
 }
 sub _derive_path {

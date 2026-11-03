@@ -42,16 +42,7 @@ sub _save_state {
     print $fh JSON::PP::encode_json($state);
     close $fh;
 }
-use constant REFRESH_RUNNING_EVERY => 5;   # seconds between ● marker refreshes
-sub _refresh_running {
-    my ($sessions, $running) = @_;
-    my %seen;
-    %$running = ();
-    for my $s (@$sessions) {
-        next if $seen{ref $s->{_adapter}}++;
-        %$running = (%$running, $s->{_adapter}->running);
-    }
-}
+use constant REFRESH_EVERY => 5;   # seconds between automatic list refreshes
 my ($OLD_TERM, $ROWS, $COLS);
 my $RESIZED = 0;
 my $CASE_SENSITIVE = 0;
@@ -180,8 +171,9 @@ sub _move_cursor {
     return $cursor;
 }
 sub interactive_select {
-    my ($self, $sessions, $running) = @_;
+    my ($self, $sessions, $running, $reload) = @_;
     $running //= {};
+    $reload  //= sub { ($sessions, $running) };
     my $state   = _load_state();
     my %sel_ids = map { $_ => 1 } @{ $state->{selected} // [] };
     my $group_by = $state->{grouped} // '';           # '', 'path' or 'agent'
@@ -191,7 +183,10 @@ sub interactive_select {
     my $offset      = 0;
     my $filter      = '';
     my $fulltext    = '';
-    my ($ft_sig, @ft_hits, $ft_match);   # cached full-text results; the scan reads every session file
+    # cached full-text results, by session id so they survive a reload;
+    # the scan reads every session file
+    my ($ft_sig, %ft_ids, $ft_match);
+    my $keep_id;   # session the cursor should stay on after a reload
     my @sort_cols = qw(selected running agent date size session path title);
     my $sort_idx  = 3;
     my $sort_rev  = 1;
@@ -201,7 +196,7 @@ sub interactive_select {
     local $SIG{WINCH} = sub { $RESIZED = 1 };
     print "\033[?25l";  
     my @result;
-    my $next_refresh = time + REFRESH_RUNNING_EVERY;
+    my $next_refresh = time + REFRESH_EVERY;
     while (1) {
         _check_resize();
         my @filtered = grep { ref $_ eq 'HASH' } @$sessions;
@@ -214,12 +209,13 @@ sub interactive_select {
         if ($fulltext) {
             my $sig = "$filter\0$fulltext\0$CASE_SENSITIVE";
             unless (defined $ft_sig && $ft_sig eq $sig) {
-                @ft_hits  = _fulltext_filter(\@filtered, $fulltext);
-                $ft_match = _match_map(@ft_hits);
+                my @hits  = _fulltext_filter(\@filtered, $fulltext);
+                %ft_ids   = map { $_->{id} => 1 } @hits;
+                $ft_match = _match_map(@hits);
                 $ft_sig   = $sig;
             }
-            _apply_match_rows(\@ft_hits, $ft_match);
-            @filtered = @ft_hits;
+            @filtered = grep { $ft_ids{ $_->{id} } } @filtered;
+            _apply_match_rows(\@filtered, $ft_match);
         } else {
             undef $ft_sig;
             delete $_->{_match} for @filtered;
@@ -229,6 +225,14 @@ sub interactive_select {
         my @entries = _build_entries($visible_sessions, $running, \%sel_ids, $group_by, $sort_col, $sort_rev);
         my $n       = scalar @entries;
         my $visible = $ROWS - 3 - 1;
+        if (defined $keep_id) {
+            for my $i (0 .. $#entries) {
+                next unless $entries[$i]{type} eq 'session' && $entries[$i]{session}{id} eq $keep_id;
+                $cursor = $i;
+                last;
+            }
+            undef $keep_id;
+        }
         ($cursor, $offset) = _clamp_list(\@entries, $cursor, $offset, $visible);
         _render(\@entries, $cursor, $offset, $visible, \%sel_ids, $group_by, $running, $filter, $fulltext, $sort_col, $sort_rev, $sort_mode);
         my $key = _read_key($next_refresh);
@@ -308,8 +312,13 @@ sub interactive_select {
             print "\033[2J";
         }
         elsif ($key eq 'r' || $key eq 'TICK') {
-            _refresh_running($sessions, $running);
-            $next_refresh = time + REFRESH_RUNNING_EVERY;
+            # re-sorting by date can move the session, so follow it by id
+            my $e = $entries[$cursor];
+            $keep_id = $e->{session}{id} if $e && $e->{type} eq 'session';
+            my ($s, $r) = do { local $App::Saisons::QUIET = 1; $reload->() };
+            @$sessions = @$s;
+            %$running  = %$r;
+            $next_refresh = time + REFRESH_EVERY;
         }
         elsif ($key eq 'v') {
             my $e = $entries[$cursor];
@@ -408,7 +417,7 @@ sub interactive_select {
                         # $filter, so only when none is active)
                         if (!$filter && @pv_stack && $pv_stack[-1][0] eq $query) {
                             $ft_sig   = "\0$query\0$CASE_SENSITIVE";
-                            @ft_hits  = @{ $pv_stack[-1][1] };
+                            %ft_ids   = map { $_->{id} => 1 } @{ $pv_stack[-1][1] };
                             $ft_match = $pv_stack[-1][2];
                         }
                     } else {

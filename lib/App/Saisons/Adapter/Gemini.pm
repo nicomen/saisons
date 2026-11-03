@@ -22,7 +22,9 @@ sub find_sessions {
         opendir my $cdh, $chats_dir or next;
         for my $file (readdir $cdh) {
             next unless $file =~ /^session-.*\.jsonl$/;
-            my $s = _parse_session("$chats_dir/$file", $self) or next;
+            my $path = "$chats_dir/$file";
+            my ($s) = App::Saisons::cached_parse($path, sub { _parse_session($path, $self) });
+            next unless $s;
             push @sessions, $s;
         }
         closedir $cdh;

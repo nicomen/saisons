@@ -87,11 +87,14 @@ sub _first_text {
     return $text;
 }
 
-sub find_sessions {
-    my ($self) = @_;
-    my $rows = $self->_sqlite_out(<<'SQL') or return ();
+sub _SESSIONS_SQL { <<'SQL' }
 SELECT s.id AS id, s.directory AS dir, s.title AS title, s.time_created AS created_ms, s.time_updated AS updated_ms, COALESCE((SELECT SUM(LENGTH(d.data)) FROM ( SELECT data FROM message WHERE session_id = s.id UNION ALL SELECT data FROM part WHERE session_id = s.id ) d), 0) AS bytes, hex((SELECT json_extract(p.data, '$.text') FROM part p JOIN message m ON m.id = p.message_id WHERE p.session_id = s.id AND json_valid(p.data) AND json_extract(p.data, '$.type') = 'text' AND json_valid(m.data) AND json_extract(m.data, '$.role') = 'user' ORDER BY p.time_created, p.id LIMIT 1)) AS first_hex FROM session s WHERE s.time_archived IS NULL ORDER BY s.time_updated DESC
 SQL
+sub find_sessions {
+    my ($self) = @_;
+    my $db = _db_path();
+    my ($rows) = App::Saisons::cached_parse($db, sub { $self->_sqlite_out(_SESSIONS_SQL()) }, "$db-wal");
+    return () unless $rows;
     my @sessions;
     for my $row (@$rows) {
         next unless $row->{id};

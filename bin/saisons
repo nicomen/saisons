@@ -29,8 +29,15 @@ my @adapters = map { $_->new }
                grep { $_->can('find_sessions') }
                plugins();
 
-my @sessions;
-my %running;
+sub load_sessions {
+    my (@sessions, %running);
+    for my $adapter (@adapters) {
+        push @sessions, $adapter->find_sessions;
+        %running = (%running, $adapter->running);
+    }
+    @sessions = sort { $b->{date} cmp $a->{date} } @sessions;
+    return (\@sessions, \%running);
+}
 
 # ── detect launcher ───────────────────────────────────────────────────────────
 
@@ -49,17 +56,10 @@ my $launcher = $ENV{SAISONS_LAUNCHER} // $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
 my $ui = App::Saisons::UI->new;
 
 while (1) {
-    # Refresh sessions and running state each iteration
-    @sessions = ();
-    %running  = ();
-    for my $adapter (@adapters) {
-        push @sessions, $adapter->find_sessions;
-        %running = (%running, $adapter->running);
-    }
-    @sessions = sort { $b->{date} cmp $a->{date} } @sessions;
-    die "No sessions found.\n" unless @sessions;
+    my ($sessions, $running) = load_sessions();
+    die "No sessions found.\n" unless @$sessions;
 
-    my @selected = $ui->interactive_select(\@sessions, \%running);
+    my @selected = $ui->interactive_select($sessions, $running, \&load_sessions);
 
     # Empty selection means the user pressed q/ESC — exit
     last unless @selected;

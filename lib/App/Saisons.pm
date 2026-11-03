@@ -10,6 +10,22 @@ sub version_string {
     no warnings 'once';
     return $VERSION . ' (' . ($main::SAISONS_BUILD // 'dev') . ')';
 }
+our $QUIET = 0;   # set while the UI is up: no progress lines over the list
+my %PARSE_CACHE;
+# Runs $parse only when $file (or one of @also, e.g. a SQLite -wal) changed
+# since the last call, so periodic rescans cost a stat per session file.
+sub cached_parse {
+    my ($file, $parse, @also) = @_;
+    my @st = stat $file or return;
+    my $key = join ';', map { my @s = stat $_; @s ? "$s[9]:$s[7]" : '-' } $file, @also;
+    my $hit = $PARSE_CACHE{$file};
+    return @{ $hit->[1] } if $hit && $hit->[0] eq $key;
+    print STDERR "\033[2KLoading $file ...\r" unless $QUIET;
+    my @r = $parse->();
+    print STDERR "\033[2K\r" unless $QUIET;
+    $PARSE_CACHE{$file} = [$key, \@r];
+    return @r;
+}
 1;
 
 __END__
