@@ -44,6 +44,8 @@ sub load_sessions {
 my $launcher = $ENV{SAISONS_LAUNCHER} // $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
     if    ($ENV{TMUX})                                          { 'tmux' }
     elsif ($ENV{STY})                                           { 'screen' }
+    elsif ($ENV{PTYXIS_VERSION}
+           && `which ptyxis 2>/dev/null` =~ /\S/)              { 'ptyxis' }
     elsif (($ENV{DISPLAY} || $ENV{WAYLAND_DISPLAY})
            && `which gnome-terminal 2>/dev/null` =~ /\S/)      { 'gnome-terminal' }
     elsif (($ENV{TERM_PROGRAM} // '') eq 'iTerm.app')          { 'iterm' }
@@ -118,9 +120,10 @@ selected sessions it shows.
 
 =item SAISONS_LAUNCHER
 
-Where selected sessions open: C<tmux>, C<screen>, C<gnome-terminal>,
-C<iterm>, C<terminal-app> or C<inline>. Without it, saisons picks one from
-the environment. The old name C<CLAUDE_SESSIONS_LAUNCHER> still works.
+Where selected sessions open: C<tmux>, C<screen>, C<ptyxis>,
+C<gnome-terminal>, C<iterm>, C<terminal-app> or C<inline>. Without it,
+saisons picks one from the environment. The old name
+C<CLAUDE_SESSIONS_LAUNCHER> still works.
 
 =item SAISONS_SEARCH_DIRS
 

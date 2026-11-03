@@ -11,6 +11,10 @@ sub launch_cmd {
         system('screen', '-X', 'screen', '-t', substr($title, 0, 20),
                'bash', '-c', "$cmd; exec bash");
     }
+    elsif ($launcher eq 'ptyxis') {
+        system('ptyxis', '--tab', '-d', $cwd, '-T', substr($title, 0, 40),
+               '--', 'bash', '--login', '-c', $cmd);
+    }
     elsif ($launcher eq 'gnome-terminal') {
         system('gnome-terminal', '--tab', "--working-directory=$cwd",
                '--', 'bash', '--login', '-c', $cmd);
