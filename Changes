@@ -1,5 +1,15 @@
 Revision history for App-Saisons
 
+0.3.0  2026-11-04
+    - New: the running bullet shows state — yellow while the agent is
+      working, green when it waits for your input.
+    - New: Codex and opencode sessions resumed through saisons get the
+      running bullet too.
+    - New: inside Ptyxis, sessions open as tabs in the active window.
+    - New: r and the automatic refresh reload the whole list, so new,
+      deleted and retitled sessions show up; the cursor stays on its
+      session and unchanged session files are not re-read.
+
 0.2.1  2026-10-22
     - Fix: reading Gemini sessions no longer dies on Windows, where
       POSIX::tzset is unimplemented.

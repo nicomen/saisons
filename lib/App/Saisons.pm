@@ -1,7 +1,7 @@
 package App::Saisons;
 use strict;
 use warnings;
-our $VERSION = '0.2.1';
+our $VERSION = '0.3.0';
 # Windows has no HOME; every module interpolating $ENV{HOME} loads this one
 BEGIN { $ENV{HOME} //= $ENV{USERPROFILE} // '' }
 # `make fatpack` stamps $main::SAISONS_BUILD (git describe) into the bundle;
