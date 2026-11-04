@@ -115,7 +115,11 @@ sub find_sessions {
     return @sessions;
 }
 sub running {
-    return ();
+    my %running;
+    for my $args (`ps -eo args 2>/dev/null`) {
+        $running{$1} = 1 if $args =~ /\bopencode\s+.*--session[= ](\S+)/;
+    }
+    return %running;
 }
 sub launch {
     my ($self, $sessions, $launcher) = @_;

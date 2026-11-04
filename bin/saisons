@@ -36,6 +36,7 @@ sub load_sessions {
         %running = (%running, $adapter->running);
     }
     @sessions = sort { $b->{date} cmp $a->{date} } @sessions;
+    App::Saisons::UI::annotate_running(\@sessions, \%running);
     return (\@sessions, \%running);
 }
 
@@ -93,6 +94,10 @@ saisons lists the coding agent sessions it finds on the machine - Claude
 Code, OpenAI Codex, Gemini CLI, Aider and opencode - in one terminal UI.
 The list shows each session's agent, age, size, path and title, and can be
 filtered, searched full-text, grouped and sorted.
+
+Running sessions get a bullet: yellow while the agent is working (its
+transcript was written in the last few seconds), green when it sits at the
+prompt waiting for input.
 
 Pressing ENTER resumes the selected sessions by running each agent's
 resume command in the session's directory: in a new tmux or screen window,

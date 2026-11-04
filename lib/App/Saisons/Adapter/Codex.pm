@@ -24,7 +24,13 @@ sub find_sessions {
     return @sessions;
 }
 sub running {
-    return ();
+    my %running;
+    for my $args (`ps -eo args 2>/dev/null`) {
+        next unless $args =~ /\bcodex\s+resume\s+(\S+)/;
+        my ($id) = $1 =~ /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl)?$/i;
+        $running{$id} = 1 if $id;
+    }
+    return %running;
 }
 sub launch {
     my ($self, $sessions, $launcher) = @_;

@@ -17,6 +17,7 @@ sub _col_cyan    { color('cyan') }
 sub _col_green   { color('green') }
 sub _col_white   { color('white') }
 sub _col_boldgrn { color('bold green') }
+sub _col_boldyel { color('bold yellow') }
 # background-only bars (256-color): column colors stay readable on top
 sub _col_sel        { "\e[48;5;23m" }   # dark teal
 sub _col_active     { "\e[48;5;24m" }   # muted steel blue
@@ -43,6 +44,33 @@ sub _save_state {
     close $fh;
 }
 use constant REFRESH_EVERY => 5;   # seconds between automatic list refreshes
+use constant WORKING_FRESH_SECS => 15;   # session file written this recently = working
+# Upgrade each running session's flag to 'working' or 'waiting' from how
+# recently its transcript was written. A _file shared between sessions (one
+# database) says nothing about a single session; its epoch is used instead.
+sub annotate_running {
+    my ($sessions, $running) = @_;
+    my $now = time;
+    my %file_count;
+    $file_count{ $_->{_file} }++ for grep { $_->{_file} } @$sessions;
+    for my $s (@$sessions) {
+        my $id = $s->{id};
+        next unless defined $id && $running->{$id};
+        my $last;
+        if ($s->{_file} && $file_count{ $s->{_file} } == 1) {
+            $last = (stat $s->{_file})[9] // 0;
+            if ($now - $last > WORKING_FRESH_SECS && $s->{_dir}) {
+                for my $f (_find_jsonl_files($s->{_dir})) {
+                    my $m = (stat $f)[9] // 0;
+                    $last = $m if $m > $last;
+                }
+            }
+        } else {
+            $last = $s->{epoch} // 0;
+        }
+        $running->{$id} = ($now - $last <= WORKING_FRESH_SECS) ? 'working' : 'waiting';
+    }
+}
 my ($OLD_TERM, $ROWS, $COLS);
 my $RESIZED = 0;
 my $CASE_SENSITIVE = 0;
@@ -486,11 +514,16 @@ my %SORT_CMP = (
     path     => sub { $_[0]{cwd}           cmp $_[1]{cwd}           },
     title    => sub { lc($_[0]{title})     cmp lc($_[1]{title})     },
 );
+sub _run_rank {
+    my ($running, $id) = @_;
+    my $r = $running->{$id} or return 0;
+    return $r eq 'working' ? 2 : 1;
+}
 sub _sorted {
     my ($sessions, $sort_col, $sort_rev, $sel_ids, $running) = @_;
     my $cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
     my @ann = map { { %$_, _sel => $sel_ids->{$_->{id}} ? 1 : 0,
-                           _run => $running->{$_->{id}} ? 1 : 0 } } @$sessions;
+                           _run => _run_rank($running, $_->{id}) } } @$sessions;
     my @sorted = sort { $cmp->($a, $b) } @ann;
     @sorted = reverse @sorted if $sort_rev;
     return @sorted;
@@ -512,9 +545,9 @@ sub _build_entries {
         my $dir_cmp = $SORT_CMP{$sort_col} // $SORT_CMP{date};
         my @dirs = sort {
             my $ann_a = { %{$sorted_dir{$a}[0]}, _sel => $sel_ids->{$sorted_dir{$a}[0]{id}} ? 1 : 0,
-                                                 _run => $running->{$sorted_dir{$a}[0]{id}} ? 1 : 0 };
+                                                 _run => _run_rank($running, $sorted_dir{$a}[0]{id}) };
             my $ann_b = { %{$sorted_dir{$b}[0]}, _sel => $sel_ids->{$sorted_dir{$b}[0]{id}} ? 1 : 0,
-                                                 _run => $running->{$sorted_dir{$b}[0]{id}} ? 1 : 0 };
+                                                 _run => _run_rank($running, $sorted_dir{$b}[0]{id}) };
             $dir_cmp->($ann_a, $ann_b) || $a cmp $b
         } keys %sorted_dir;
         @dirs = reverse @dirs if $sort_rev;
@@ -834,7 +867,9 @@ sub _render {
                : $is_sel            ? _col_sel
                :                      '';
         my $row = $sel_mark . ' '
-             . ($is_running ? _col_boldgrn . $running_bullet . RESET : ' ') . ' '
+             . ($is_running ? ($is_running eq 'working' ? _col_boldyel : _col_boldgrn)
+                              . $running_bullet . RESET
+                            : ' ') . ' '
              . $tag . RESET . ' '
              . _col_yellow . $when . ' '
              . _col_cyan   . $size . ' '
