@@ -16,6 +16,7 @@ use Module::Pluggable (
 );
 use App::Saisons;
 use App::Saisons::UI;
+use App::Saisons::Launcher ();
 
 if (@ARGV && $ARGV[0] eq '--version') {
     print 'saisons ' . App::Saisons::version_string() . "\n";
@@ -45,6 +46,8 @@ sub load_sessions {
 my $launcher = $ENV{SAISONS_LAUNCHER} // $ENV{CLAUDE_SESSIONS_LAUNCHER} // do {
     if    ($ENV{TMUX})                                          { 'tmux' }
     elsif ($ENV{STY})                                           { 'screen' }
+    elsif ($ENV{TILIX_ID}
+           && `which tilix 2>/dev/null` =~ /\S/)               { 'tilix' }
     elsif ($ENV{PTYXIS_VERSION}
            && `which ptyxis 2>/dev/null` =~ /\S/)              { 'ptyxis' }
     elsif (($ENV{DISPLAY} || $ENV{WAYLAND_DISPLAY})
@@ -72,9 +75,11 @@ while (1) {
     for my $s (@selected) {
         push @{ $by_adapter{ ref $s->{_adapter} } }, $s;
     }
-    for my $group (values %by_adapter) {
-        $group->[0]{_adapter}->launch($group, $launcher);
-    }
+    App::Saisons::Launcher::batch($launcher, sub {
+        for my $group (values %by_adapter) {
+            $group->[0]{_adapter}->launch($group, $launcher);
+        }
+    });
 }
 
 __END__
@@ -126,7 +131,7 @@ selected sessions it shows.
 =item SAISONS_LAUNCHER
 
 Where selected sessions open: C<tmux>, C<screen>, C<ptyxis>,
-C<gnome-terminal>, C<iterm>, C<terminal-app> or C<inline>. Without it,
+C<tilix>, C<gnome-terminal>, C<iterm>, C<terminal-app> or C<inline>. Without it,
 saisons picks one from the environment. The old name
 C<CLAUDE_SESSIONS_LAUNCHER> still works.
 

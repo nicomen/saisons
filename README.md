@@ -20,7 +20,7 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 - Move sessions between directories (`m`)
 - Delete sessions (`d`)
 - Remembers selection and view mode across restarts
-- Auto-detects tmux, screen, gnome-terminal, iTerm2, and Terminal.app
+- Auto-detects tmux, screen, Tilix, Ptyxis, gnome-terminal, iTerm2, and Terminal.app
 
 ## Install
 
@@ -110,17 +110,20 @@ saisons
 decides *in which terminal* that command runs:
 
 - `tmux` / `screen` — one new multiplexer window per session
-- `gnome-terminal` / `iterm` / `terminal-app` — one new tab or window per session
+- `tilix` / `ptyxis` — one new tab per session in the active window
+- `gnome-terminal` — one new window with a tab per session
+- `iterm` / `terminal-app` — one new tab or window per session
 - `inline` — run in the current terminal, one session after the other
 
-saisons picks one automatically (in tmux → `tmux`, GUI with gnome-terminal →
-`gnome-terminal`, macOS → `iterm`/`terminal-app`, otherwise `inline`).
+saisons picks one automatically (in tmux → `tmux`, in Tilix or Ptyxis → `tilix` /
+`ptyxis`, GUI with gnome-terminal → `gnome-terminal`, macOS →
+`iterm`/`terminal-app`, otherwise `inline`).
 Override it when the guess isn't what you want — for example to take over
 the current pane even though you are inside tmux:
 
 ```sh
 SAISONS_LAUNCHER=inline saisons
-# tmux, screen, gnome-terminal, iterm, terminal-app, inline
+# tmux, screen, tilix, ptyxis, gnome-terminal, iterm, terminal-app, inline
 # (the old name CLAUDE_SESSIONS_LAUNCHER still works)
 ```
 

@@ -30,12 +30,6 @@ sub _db_path {
     return "$data_home/opencode/opencode.db";
 }
 
-sub _shq {
-    my ($s) = @_;
-    $s =~ s/'/'\\''/g;
-    return "'$s'";
-}
-
 sub _q {
     my ($s) = @_;
     $s =~ s/'/''/g if defined $s;
@@ -47,7 +41,8 @@ sub _sqlite_out {
     my $db  = _db_path();
     my $exe = _sqlite3() or return undef;
     return undef unless -f $db;
-    my $cmd = join(' ', _shq($exe), '-readonly', '-json', _shq($db), _shq($sql)) . ' 2>/dev/null';
+    my $cmd = join(' ', map(App::Saisons::Launcher::shell_quote($_), $exe), '-readonly', '-json',
+                   map(App::Saisons::Launcher::shell_quote($_), $db, $sql)) . ' 2>/dev/null';
     my $out = `$cmd`;
     return undef unless $? == 0 && defined $out;
     my $rows = eval { JSON::PP::decode_json($out) };
@@ -59,7 +54,7 @@ sub _sqlite_exec {
     my $db  = _db_path();
     my $exe = _sqlite3() or return 0;
     return 0 unless -f $db;
-    my $cmd = join(' ', _shq($exe), _shq($db), _shq($sql), '>/dev/null', '2>&1');
+    my $cmd = join(' ', map(App::Saisons::Launcher::shell_quote($_), $exe, $db, $sql), '>/dev/null', '2>&1');
     return system($cmd) == 0;
 }
 

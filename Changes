@@ -6,6 +6,9 @@ Revision history for App-Saisons
     - New: Codex and opencode sessions resumed through saisons get the
       running bullet too.
     - New: inside Ptyxis, sessions open as tabs in the active window.
+    - New: inside Tilix, sessions open as tabs in the active window.
+    - Fix: several sessions opened with gnome-terminal share one new
+      window instead of opening a window each.
     - New: r and the automatic refresh reload the whole list, so new,
       deleted and retitled sessions show up; the cursor stays on its
       session and unchanged session files are not re-read.
