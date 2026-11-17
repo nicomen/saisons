@@ -1,6 +1,7 @@
 package App::Saisons;
 use strict;
 use warnings;
+use JSON::PP ();
 our $VERSION = '0.3.0';
 # Windows has no HOME; every module interpolating $ENV{HOME} loads this one
 BEGIN { $ENV{HOME} //= $ENV{USERPROFILE} // '' }
@@ -10,6 +11,11 @@ sub version_string {
     no warnings 'once';
     return $VERSION . ' (' . ($main::SAISONS_BUILD // 'dev') . ')';
 }
+# JSON from a line read through a :utf8 layer. Such a line is already
+# characters, which decode_json (it wants UTF-8 bytes) refuses as soon as
+# it holds anything outside ASCII.
+my $JSON_CHARS = JSON::PP->new;
+sub decode_json_line { return $JSON_CHARS->decode($_[0]) }
 our $QUIET = 0;   # set while the UI is up: no progress lines over the list
 my %PARSE_CACHE;
 # Runs $parse only when $file (or one of @also, e.g. a SQLite -wal) changed

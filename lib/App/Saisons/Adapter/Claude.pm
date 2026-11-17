@@ -164,7 +164,7 @@ sub _extract_meta {
         $title = $1 if !defined $title && /"aiTitle":"([^"]+)"/;
         $cwd   = $1 if !$cwd && /"cwd":"([^"]+)"/;
         if (!$first_msg && /"role":"user"/) {
-            my $obj = eval { decode_json($_) } or next;
+            my $obj = eval { App::Saisons::decode_json_line($_) } or next;
             my $c   = $obj->{message}{content};
             my $txt = ref $c eq 'ARRAY' ? ($c->[0]{text} // '') : ($c // '');
             next if $txt =~ /^This session is being continued from a previous conversation/;

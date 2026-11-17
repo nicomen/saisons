@@ -49,7 +49,7 @@ sub load_messages {
     my @messages;
     open my $fh, '<:utf8', $session->{_file} or return @messages;
     while (my $line = <$fh>) {
-        my $obj     = eval { JSON::PP::decode_json($line) } or next;
+        my $obj     = eval { App::Saisons::decode_json_line($line) } or next;
         my $type    = $obj->{type}    // '';
         my $payload = $obj->{payload} // {};
         if ($type eq 'event_msg' && ($payload->{type} // '') eq 'user_message') {
@@ -107,7 +107,7 @@ sub _parse_session {
     open my $fh, '<:utf8', $file or return undef;
     my ($id, $cwd, $title);
     while (my $line = <$fh>) {
-        my $obj = eval { JSON::PP::decode_json($line) } or next;
+        my $obj = eval { App::Saisons::decode_json_line($line) } or next;
         my $type    = $obj->{type}    // '';
         my $payload = $obj->{payload} // {};
         if ($type eq 'session_meta') {

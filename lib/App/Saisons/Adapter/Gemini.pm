@@ -57,7 +57,7 @@ sub load_messages {
     my $first = 1;
     while (my $line = <$fh>) {
         if ($first) { $first = 0; next }  
-        my $obj  = eval { JSON::PP::decode_json($line) } or next;
+        my $obj  = eval { App::Saisons::decode_json_line($line) } or next;
         my $type = $obj->{type} // '';
         next unless $type eq 'user' || $type eq 'gemini';
         my $role = $type eq 'user' ? 'user' : 'assistant';
@@ -73,7 +73,7 @@ sub _parse_session {
     my ($id, $title, $date_str, $epoch, $cwd);
     my $first = 1;
     while (my $line = <$fh>) {
-        my $obj = eval { JSON::PP::decode_json($line) } or next;
+        my $obj = eval { App::Saisons::decode_json_line($line) } or next;
         if ($first) {
             $first = 0;
             $id  = $obj->{sessionId} or return undef;

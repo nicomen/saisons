@@ -4,6 +4,7 @@ use Test::More;
 use File::Spec;
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
+use File::Basename ();
 use File::Copy::Recursive qw(dircopy);
 use lib 'lib';
 
@@ -276,6 +277,46 @@ SQL
     ok(system($exe, $db, $blank) == 0, 'opencode: built no-text fixture');
     my ($empty) = grep { $_->{id} eq 'ses_empt0000000000001' } $adapter->find_sessions;
     is($empty->{title}, '(no title)', 'opencode: default title without user text falls back to (no title)');
+};
+
+# ── non-ASCII text in JSON lines ─────────────────────────────────────────────
+
+subtest 'non-ASCII session text' => sub {
+    use utf8;
+    my $tmp   = tempdir(CLEANUP => 1);
+    my $write = sub {
+        my ($file, @lines) = @_;
+        make_path(File::Basename::dirname($file));
+        open my $fh, '>:utf8', $file or die "$file: $!";
+        print $fh map { "$_\n" } @lines;
+        close $fh;
+    };
+
+    local $ENV{HOME} = $tmp;
+    local $ENV{CODEX_HOME};
+    $write->("$tmp/.codex/sessions/2026/02/01/rollout-2026-02-01T10-00-00-eeeeeeee-0000-1111-2222-333333333333.jsonl",
+        '{"type":"session_meta","payload":{"id":"eeeeeeee-0000-1111-2222-333333333333","cwd":"/home/user/p","base_instructions":{"text":"Don’t panic — ok"}}}',
+        '{"type":"event_msg","payload":{"type":"user_message","message":"Fiks påloggingen"}}',
+        '{"type":"response_item","payload":{"role":"assistant","content":[{"type":"text","text":"Gjort ✓"}]}}');
+    require App::Saisons::Adapter::Codex;
+    my ($codex) = App::Saisons::Adapter::Codex->new->find_sessions;
+    ok($codex, 'Codex: session with non-ASCII metadata is found');
+    is($codex && $codex->{title}, 'Fiks påloggingen', 'Codex: non-ASCII title');
+    my @msgs = $codex ? App::Saisons::Adapter::Codex->new->load_messages($codex) : ();
+    is($msgs[1]{text}, 'Gjort ✓', 'Codex: non-ASCII message text');
+
+    $write->("$tmp/.gemini/tmp/p/chats/session-2026-02-01T10-00-ffffffff.jsonl",
+        '{"sessionId":"ffffffff-0000-1111-2222-333333333333","startTime":"2026-02-01T10:00:00Z","directories":["/home/user/p"]}',
+        '{"type":"user","content":[{"text":"Hvorfor går det så tregt?"}]}');
+    require App::Saisons::Adapter::Gemini;
+    my ($gemini) = App::Saisons::Adapter::Gemini->new->find_sessions;
+    is($gemini && $gemini->{title}, 'Hvorfor går det så tregt?', 'Gemini: non-ASCII title');
+
+    $write->("$tmp/.claude/projects/-home-user-p/dddddddd-0000-1111-2222-333333333333.jsonl",
+        '{"type":"user","cwd":"/home/user/p","timestamp":"2026-02-01T10:00:00Z","message":{"role":"user","content":"Lag en øvelse"}}');
+    require App::Saisons::Adapter::Claude;
+    my ($claude) = App::Saisons::Adapter::Claude->new->find_sessions;
+    is($claude && $claude->{title}, 'Lag en øvelse', 'Claude: non-ASCII first message as title');
 };
 
 done_testing;

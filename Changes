@@ -6,6 +6,8 @@ Unreleased
       list.
     - New: import shows which project folders are missing, with the
       git clone command for each, and can clone them for you.
+    - Fix: Codex sessions with non-ASCII text now show up, and Gemini and
+      Claude sessions keep their non-ASCII titles.
 
 0.3.0  2026-11-04
     - New: the running bullet shows state — yellow while the agent is
