@@ -144,7 +144,8 @@ sub _extract_text {
     my ($content) = @_;
     return '' unless defined $content;
     return $content unless ref $content;
-    return join '', map { ref $_ eq 'HASH' && ($_->{type}//'') eq 'text' ? $_->{text} : '' }
+    # assistant replies are output_text blocks; older sessions used text
+    return join '', map { ref $_ eq 'HASH' && ($_->{type}//'') =~ /^(?:output_)?text$/ ? $_->{text} : '' }
                     ref $content eq 'ARRAY' ? @$content : ();
 }
 sub _sessions_dir { ($ENV{CODEX_HOME} // "$ENV{HOME}/.codex") . "/sessions" }

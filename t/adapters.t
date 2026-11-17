@@ -301,7 +301,7 @@ subtest 'non-ASCII session text' => sub {
     $write->("$tmp/.codex/sessions/2026/02/01/rollout-2026-02-01T10-00-00-eeeeeeee-0000-1111-2222-333333333333.jsonl",
         '{"type":"session_meta","payload":{"id":"eeeeeeee-0000-1111-2222-333333333333","cwd":"/home/user/p","base_instructions":{"text":"Don’t panic — ok"}}}',
         '{"type":"event_msg","payload":{"type":"user_message","message":"Fiks påloggingen"}}',
-        '{"type":"response_item","payload":{"role":"assistant","content":[{"type":"text","text":"Gjort ✓"}]}}');
+        '{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"Gjort ✓"}]}}');
     require App::Saisons::Adapter::Codex;
     my ($codex) = App::Saisons::Adapter::Codex->new->find_sessions;
     ok($codex, 'Codex: session with non-ASCII metadata is found');

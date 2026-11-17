@@ -11,6 +11,7 @@ Unreleased
     - Fix: SAISONS_SEARCH_DIRS works on Windows; separate directories with
       ';' there, as in PATH.
     - Fix: the list picks up opencode changes made within the same second.
+    - Fix: viewing a Codex session shows the assistant's replies.
 
 0.3.0  2026-11-04
     - New: the running bullet shows state — yellow while the agent is
