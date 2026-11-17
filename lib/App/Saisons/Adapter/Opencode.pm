@@ -55,6 +55,7 @@ sub _sqlite_exec {
     my ($self, $sql) = @_;
     return 0 unless -f _db_path();
     my ($ok) = $self->_sqlite_try($sql);
+    App::Saisons::forget_parse(_db_path());
     return $ok;
 }
 
@@ -241,6 +242,7 @@ sub import_sessions {
       . join('', map { $copy->($_) } grep { $local{$_} } @tables)
       . "COMMIT;\n";
     ($ok, $err) = $self->_sqlite_try($sql);
+    App::Saisons::forget_parse($db);
     return $fail->("import failed: $err") unless $ok;
     return map { App::Saisons::Transfer::result($_, $here{ $_->{id} } ? 'exists' : 'imported') } @$entries;
 }

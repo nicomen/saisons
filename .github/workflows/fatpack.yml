@@ -1,0 +1,80 @@
+name: Fatpack
+
+# Rebuilds the self-contained `saisons` script from bin/ and lib/ and
+# commits it to main, so the curl installer always gets the current code.
+
+on:
+  push:
+    branches: [main]
+    paths: ['bin/**', 'lib/**', 'Makefile.PL', '.github/workflows/fatpack.yml']
+  workflow_dispatch:
+
+# only the newest push matters: its build includes everything before it
+concurrency:
+  group: fatpack
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # push the rebuilt script
+  actions: write    # start the install-script check, see the last step
+
+jobs:
+  fatpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0   # git describe stamps the build
+
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.40'
+
+      - name: Install dependencies
+        run: |
+          cpanm --notest --installdeps .
+          cpanm --notest App::SlimPacker Module::Pluggable
+
+      - name: Build
+        run: |
+          perl Makefile.PL
+          make fatpack
+
+      - name: Smoke-test the packed script
+        # outside the checkout, so nothing loads from lib/
+        run: |
+          dir=$(mktemp -d)
+          cp saisons "$dir/"
+          mkdir -p "$dir/src" "$dir/dst"
+          cp -r t/fixtures/claude/.claude t/fixtures/gemini/.gemini "$dir/src/"
+          cp -r t/fixtures/codex "$dir/src/.codex"
+          cd "$dir"
+          ./saisons --version | grep -E '^saisons [0-9]'
+          HOME="$dir/src" ./saisons --export x.tar.gz | tee export.log
+          grep -q 'Exported 4 session' export.log
+          HOME="$dir/dst" ./saisons --import x.tar.gz --no-clone | tee import.log
+          grep -q 'Imported 4 session' import.log
+
+      - name: Commit if changed
+        id: commit
+        run: |
+          git add saisons
+          if git diff --cached --quiet; then
+            echo "saisons is up to date"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Rebuild fatpacked saisons'
+          git push origin HEAD:main
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
+
+      # pushes made with GITHUB_TOKEN start no workflows, so start the
+      # install-script check for the new saisons by hand
+      - name: Check install scripts
+        if: steps.commit.outputs.pushed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run install.yml --ref main

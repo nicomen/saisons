@@ -6,6 +6,7 @@ use File::Path qw(make_path);
 use File::Temp qw(tempdir);
 use File::Copy::Recursive qw(dircopy);
 use lib 'lib';
+use JSON::PP ();
 use App::Saisons::Transfer ();
 use App::Saisons::Adapter::Aider ();
 use App::Saisons::Adapter::Claude ();
@@ -128,7 +129,7 @@ subtest 'export and import files' => sub {
     ok($slug, 'Gemini project path registered');
     my ($gemini) = glob "$dst/.gemini/tmp/$slug/chats/session-*.jsonl";
     my ($first)  = split /\n/, slurp($gemini);
-    like($first, qr{"directories":\["\Q$dst\E/myproject"\]}, 'Gemini directories rewritten');
+    is_deeply(JSON::PP::decode_json($first)->{directories}, ["$dst/myproject"], 'Gemini directories rewritten');
 
     my @found = App::Saisons::Adapter::Claude->new->find_sessions;
     is(scalar @found, 2, 'imported Claude sessions are listed');
@@ -238,11 +239,16 @@ subtest 'project report and clone' => sub {
     local $ENV{GIT_CONFIG_NOSYSTEM} = 1;
     local $ENV{GIT_AUTHOR_NAME}  = local $ENV{GIT_COMMITTER_NAME}  = 'T';
     local $ENV{GIT_AUTHOR_EMAIL} = local $ENV{GIT_COMMITTER_EMAIL} = 't@example.com';
-    my $git = sub { system('git', @_) == 0 or die "git @_ failed" };
-    $git->('init', '-q', '--bare', "$tmp/remote.git");
-    $git->('clone', '-q', "$tmp/remote.git", "$tmp/home/repo");
-    $git->('-C', "$tmp/home/repo", 'commit', '-q', '--allow-empty', '-m', 'one');
-    $git->('-C', "$tmp/home/repo", 'push', '-q', 'origin', 'HEAD');
+    my $git = sub { system('git', @_) == 0 or die "git @_ failed\n" };
+    # a git that cannot handle this platform's temp paths (Windows git under
+    # Cygwin) is as good as none
+    eval {
+        $git->('init', '-q', '--bare', "$tmp/remote.git");
+        $git->('clone', '-q', "$tmp/remote.git", "$tmp/home/repo");
+        $git->('-C', "$tmp/home/repo", 'commit', '-q', '--allow-empty', '-m', 'one');
+        $git->('-C', "$tmp/home/repo", 'push', '-q', 'origin', 'HEAD');
+        1;
+    } or plan skip_all => "git does not work here: $@";
     make_path("$tmp/home/repo/sub", "$tmp/home/plain");
 
     my $layout = do {

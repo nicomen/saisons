@@ -2,6 +2,7 @@ package App::Saisons;
 use strict;
 use warnings;
 use JSON::PP ();
+use Time::HiRes ();
 our $VERSION = '0.3.0';
 # Windows has no HOME; every module interpolating $ENV{HOME} loads this one
 BEGIN { $ENV{HOME} //= $ENV{USERPROFILE} // '' }
@@ -23,7 +24,9 @@ my %PARSE_CACHE;
 sub cached_parse {
     my ($file, $parse, @also) = @_;
     my @st = stat $file or return;
-    my $key = join ';', map { my @s = stat $_; @s ? "$s[9]:$s[7]" : '-' } $file, @also;
+    # sub-second mtimes: a small SQLite file often keeps its size when a row
+    # changes, so whole seconds would miss two writes in the same second
+    my $key = join ';', map { my @s = Time::HiRes::stat($_); @s ? "$s[9]:$s[7]" : '-' } $file, @also;
     my $hit = $PARSE_CACHE{$file};
     return @{ $hit->[1] } if $hit && $hit->[0] eq $key;
     print STDERR "\033[2KLoading $file ...\r" unless $QUIET;
@@ -31,6 +34,11 @@ sub cached_parse {
     print STDERR "\033[2K\r" unless $QUIET;
     $PARSE_CACHE{$file} = [$key, \@r];
     return @r;
+}
+# Call after changing $file yourself, so the next scan reads it again.
+sub forget_parse {
+    my ($file) = @_;
+    delete $PARSE_CACHE{$file};
 }
 1;
 

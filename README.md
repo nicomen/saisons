@@ -73,7 +73,9 @@ make fatpack
 `make fatpack` runs `slimpack -o saisons bin/saisons` (the external
 App-SlimPacker bundler, which minifies; needs `slimpack` on `PATH` and
 `PPI`). `saisons` is generated output — edit `bin/saisons` and `lib/`, not
-`saisons`.
+`saisons`. You rarely need to run it yourself: on every push to `main`
+that touches `bin/` or `lib/`, GitHub Actions rebuilds `saisons`, checks
+that it runs, and commits it.
 
 ## Usage
 
@@ -178,7 +180,7 @@ Logins and API keys are not exported.
 | Gemini CLI | `~/.gemini/tmp/<slug>/chats/` | `gemini --resume <uuid>` |
 | opencode | `~/.local/share/opencode/opencode.db` (SQLite) | `opencode --session <id>` |
 
-Aider history files are searched one level deep under `~/projects`, `~/dev`, `~/src`, `~/work`, `~/code`, and `/projects`. Override with `SAISONS_SEARCH_DIRS=dir1:dir2`.
+Aider history files are searched one level deep under `~/projects`, `~/dev`, `~/src`, `~/work`, `~/code`, and `/projects`. Override with `SAISONS_SEARCH_DIRS=dir1:dir2` (separate with `;` on Windows).
 
 The opencode adapter reads its SQLite database via the `sqlite3` CLI, which must be installed. `XDG_DATA_HOME` is respected.
 

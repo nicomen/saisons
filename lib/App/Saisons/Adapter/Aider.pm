@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use App::Saisons ();
 use POSIX qw();
+use Config ();
 use App::Saisons::Launcher ();
 use App::Saisons::Transfer ();
 use File::Basename ();
@@ -15,7 +16,8 @@ sub find_sessions {
     my ($self) = @_;
     my @search_dirs;
     if (my $env = $ENV{SAISONS_SEARCH_DIRS}) {
-        @search_dirs = split /:/, $env;
+        # separated like PATH: ':' here, ';' on Windows where ':' follows the drive
+        @search_dirs = split /\Q$Config::Config{path_sep}\E/, $env;
     }
     else {
         my $home = $ENV{HOME};

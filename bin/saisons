@@ -183,7 +183,8 @@ C<CLAUDE_SESSIONS_LAUNCHER> still works.
 
 =item SAISONS_SEARCH_DIRS
 
-Colon-separated directories to scan for Aider history files, instead of
+Directories to scan for Aider history files, separated like C<PATH>
+(C<:>, or C<;> on Windows), instead of
 the default project directories.
 
 =back
