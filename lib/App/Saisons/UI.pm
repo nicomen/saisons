@@ -5,6 +5,7 @@ use warnings;
 use utf8;
 use POSIX qw();
 use App::Saisons;
+use App::Saisons::Transfer ();
 use Term::ANSIColor qw(colored color);
 use JSON::PP ();
 use Encode qw(decode);
@@ -381,6 +382,16 @@ sub interactive_select {
                 undef $ft_sig;
                 $cursor = 0; $offset = 0;
                 _init_term(); print "\033[?25l";
+            }
+        }
+        elsif ($key eq 'e') {
+            # marked sessions, or everything the list shows
+            my @to_export = _selected_sessions(\%sel_ids, \@filtered);
+            @to_export = @filtered unless @to_export;
+            if (@to_export) {
+                _restore_term(); print "\033[?25h";
+                _do_export(\@to_export);
+                _init_term(); print "\033[?25l\033[2J";
             }
         }
         elsif ($key eq '/' || $key eq '?') {
@@ -903,7 +914,7 @@ sub _render {
         ? sprintf('[←→] sort column  [↑↓] direction  [s/ENTER/ESC] done   sorting: %s   %d/%d%s',
             $sort_col . ($sort_rev ? '↓' : '↑'), $nsel, $n, $pct)
         : sprintf(
-        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [t] %s  [s]ort  [r]efresh  [/] filter  [?] search  [a] all  [c] clear  [q]uit   %d/%d%s%s',
+        '[↑↓/jk] [PgUp/Dn] [SPC] select  [ENTER] open  [v]iew  [d]el  [m]ove  [e]xport  [t] %s  [s]ort  [r]efresh  [/] filter  [?] search  [a] all  [c] clear  [q]uit   %d/%d%s%s',
         $toggle_mode, $nsel, $n, $pct,
         ($filter   ? colored("  /filter: $filter",     'bold cyan')   : '')
       . ($fulltext ? colored("  ?search: $fulltext",   'bold yellow') : ''));
@@ -1086,6 +1097,23 @@ sub _do_move {
         print $ok ? _str_boldgrn("Moved $session->{id}\n") : _str_boldred("Error: $err\n");
     }
     print "Press Enter..."; <STDIN>;
+}
+sub _do_export {
+    my ($chosen) = @_;
+    my $default = App::Saisons::Transfer::default_file();
+    print "\033[2J\033[H";
+    print _str_bold('Export ' . scalar(@$chosen) . " session(s)\n\n");
+    print 'File [' . _str_boldgrn($default) . ']: ';
+    my $file = <STDIN>;
+    return unless defined $file;
+    $file =~ s/^\s+|\s+$//g;
+    $file = $default unless length $file;
+    $file =~ s{^~(?=/|$)}{$ENV{HOME}};
+    print "\n";
+    my $r = eval { App::Saisons::Transfer::export_sessions($chosen, $file) };
+    print $r ? _str_boldgrn(join("\n", App::Saisons::Transfer::export_summary($r)) . "\n")
+             : _str_boldred("Export failed: $@");
+    print "\nPress Enter..."; <STDIN>;
 }
 # last component of a class name; s///r needs perl >= 5.14, we support 5.10
 sub _short_class {

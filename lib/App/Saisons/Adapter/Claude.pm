@@ -4,15 +4,17 @@ use warnings;
 use App::Saisons ();
 use JSON::PP;
 use POSIX qw();
+use File::Basename ();
 use Time::Local qw();
 use App::Saisons::Launcher ();
+use App::Saisons::Transfer ();
 sub new { bless {}, shift }
 sub name      { 'Claude Code' }
 sub tag       { "\x{2736} Cld" }
 sub tag_color { 'bold red' }
 sub find_sessions {
     my ($self) = @_;
-    my $projects_dir = "$ENV{HOME}/.claude/projects";
+    my $projects_dir = _projects_dir();
     my %running_names;
     my $sessions_dir = "$ENV{HOME}/.claude/sessions";
     if (opendir my $sdh, $sessions_dir) {
@@ -100,12 +102,10 @@ sub delete_session {
 }
 sub move_session {
     my ($self, $session, $new_cwd) = @_;
-    my $projects_dir = "$ENV{HOME}/.claude/projects";
+    my $projects_dir = _projects_dir();
     my $old_cwd      = $session->{cwd};
     my $old_file     = $session->{_file};
-    (my $new_project = $new_cwd) =~ s|/|-|g;
-    $new_project =~ s/^-//;  
-    $new_project = "-$new_project";
+    my $new_project = _project_dir_name($new_cwd);
     my $new_dir  = "$projects_dir/$new_project";
     my $new_file = "$new_dir/$session->{id}.jsonl";
     unless (-d $new_dir) {
@@ -185,5 +185,49 @@ sub _extract_meta {
 sub _derive_path {
     my ($project) = @_;
     return $project;
+}
+sub _projects_dir { "$ENV{HOME}/.claude/projects" }
+# Claude names a project's folder after its path, with every character
+# other than a letter or digit turned into '-'.
+sub _project_dir_name {
+    my ($path) = @_;
+    (my $name = $path) =~ s/[^A-Za-z0-9]/-/g;
+    return $name;
+}
+# Copies each session file, its subagent folder, and once per project the
+# project's memory folder.
+sub export_sessions {
+    my ($self, $sessions, $dir) = @_;
+    my (@entries, %memory_done);
+    for my $s (@$sessions) {
+        my $project = $s->{project};
+        App::Saisons::Transfer::copy_file($s->{_file}, "$dir/$project/$s->{id}.jsonl");
+        App::Saisons::Transfer::copy_tree($s->{_dir}, "$dir/$project/$s->{id}") if $s->{_dir};
+        my $memory = File::Basename::dirname($s->{_file}) . '/memory';
+        App::Saisons::Transfer::copy_tree($memory, "$dir/$project/memory")
+            unless $memory_done{$project}++;
+        push @entries, App::Saisons::Transfer::entry($s, project => $project);
+    }
+    return @entries;
+}
+sub import_sessions {
+    my ($self, $entries, $dir, $map) = @_;
+    my $rewrite = App::Saisons::Transfer::json_path_rewriter($map, 'cwd');
+    my %memory_done;
+    return App::Saisons::Transfer::import_each($entries, sub {
+        my ($e) = @_;
+        my $src = "$dir/" . App::Saisons::Transfer::safe_rel($e->{project});
+        my $id  = App::Saisons::Transfer::safe_rel($e->{id});
+        my $cwd = $map->($e->{cwd});
+        my $project = $cwd eq $e->{cwd} ? $e->{project} : _project_dir_name($cwd);
+        my $dst = _projects_dir() . "/$project";
+        return 'exists' if -e "$dst/$id.jsonl";
+        App::Saisons::Transfer::copy_tree("$src/$id", "$dst/$id", rewrite => $rewrite);
+        App::Saisons::Transfer::copy_tree("$src/memory", "$dst/memory", keep => 1)
+            unless $memory_done{$project}++;
+        # the transcript last: its presence is what marks the session imported
+        App::Saisons::Transfer::copy_file("$src/$id.jsonl", "$dst/$id.jsonl", rewrite => $rewrite);
+        return 'imported';
+    });
 }
 1;

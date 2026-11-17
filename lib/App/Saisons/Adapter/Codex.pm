@@ -4,15 +4,16 @@ use warnings;
 use App::Saisons ();
 use JSON::PP ();
 use POSIX qw();
+use File::Spec ();
 use App::Saisons::Launcher ();
+use App::Saisons::Transfer ();
 sub new { bless {}, shift }
 sub name      { 'Codex' }
 sub tag       { "\x{2601} Cdx" }
 sub tag_color { 'bold cyan' }
 sub find_sessions {
     my ($self) = @_;
-    my $root = $ENV{CODEX_HOME} // "$ENV{HOME}/.codex";
-    my $sessions_dir = "$root/sessions";
+    my $sessions_dir = _sessions_dir();
     return () unless -d $sessions_dir;
     my @files = _find_session_files($sessions_dir);
     my @sessions;
@@ -145,5 +146,28 @@ sub _extract_text {
     return $content unless ref $content;
     return join '', map { ref $_ eq 'HASH' && ($_->{type}//'') eq 'text' ? $_->{text} : '' }
                     ref $content eq 'ARRAY' ? @$content : ();
+}
+sub _sessions_dir { ($ENV{CODEX_HOME} // "$ENV{HOME}/.codex") . "/sessions" }
+# Session files keep their place under sessions/ (date folders, archive).
+sub export_sessions {
+    my ($self, $sessions, $dir) = @_;
+    my $root = _sessions_dir();
+    return map {
+        my $rel = File::Spec->abs2rel($_->{_file}, $root);
+        App::Saisons::Transfer::copy_file($_->{_file}, "$dir/$rel");
+        App::Saisons::Transfer::entry($_, file => $rel);
+    } @$sessions;
+}
+sub import_sessions {
+    my ($self, $entries, $dir, $map) = @_;
+    my $rewrite = App::Saisons::Transfer::json_path_rewriter($map, "cwd");
+    return App::Saisons::Transfer::import_each($entries, sub {
+        my ($e) = @_;
+        my $rel = App::Saisons::Transfer::safe_rel($e->{file});
+        my $dst = _sessions_dir() . "/$rel";
+        return "exists" if -e $dst;
+        App::Saisons::Transfer::copy_file("$dir/$rel", $dst, rewrite => $rewrite);
+        return "imported";
+    });
 }
 1;

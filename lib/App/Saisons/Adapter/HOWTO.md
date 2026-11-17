@@ -61,6 +61,42 @@ sub load_messages {
 1;
 ```
 
+## Export and import (optional)
+
+Two more methods let `saisons --export` / `--import` move your sessions
+to another machine. Adapters without them are skipped, with a note.
+
+```perl
+# Copy the sessions' data into $dir (a folder only this adapter writes to)
+# and return one hashref per session for the manifest.
+# App::Saisons::Transfer::entry($session, %extra) builds it; put whatever
+# import needs to find the files again in %extra.
+sub export_sessions {
+    my ($self, $sessions, $dir) = @_;
+    return map {
+        App::Saisons::Transfer::copy_file($_->{_file}, "$dir/$_->{id}.jsonl");
+        App::Saisons::Transfer::entry($_, file => "$_->{id}.jsonl");
+    } @$sessions;
+}
+
+# Add the exported sessions here. $map turns a path from the source
+# machine into the one to use here (it swaps the home directory).
+# import_each runs the sub per entry; return 'imported', 'exists' or
+# ('skipped', $why). A die is reported as an error for that session.
+sub import_sessions {
+    my ($self, $entries, $dir, $map) = @_;
+    my $rewrite = App::Saisons::Transfer::json_path_rewriter($map, 'cwd');
+    return App::Saisons::Transfer::import_each($entries, sub {
+        my ($e)  = @_;
+        my $file = App::Saisons::Transfer::safe_rel($e->{file});
+        my $dst  = "$ENV{HOME}/.youragent/$file";
+        return 'exists' if -e $dst;
+        App::Saisons::Transfer::copy_file("$dir/$file", $dst, rewrite => $rewrite);
+        return 'imported';
+    });
+}
+```
+
 That's it — `saisons` uses `Module::Pluggable` to auto-discover all
 `App::Saisons::Adapter::*` modules under `lib/`, so no registration is needed.
 Just drop the file in place.

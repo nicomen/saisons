@@ -4,6 +4,9 @@ use warnings;
 use App::Saisons ();
 use POSIX qw();
 use App::Saisons::Launcher ();
+use App::Saisons::Transfer ();
+use File::Basename ();
+use constant HISTORY => '.aider.chat.history.md';
 sub new { bless {}, shift }
 sub name      { 'Aider' }
 sub tag       { "a Aid" }
@@ -21,11 +24,11 @@ sub find_sessions {
             '/projects';
     }
     my @history_files = _find_history_files(\@search_dirs, 1);
-    my $home_file = "$ENV{HOME}/.aider.chat.history.md";
+    my $home_file = "$ENV{HOME}/" . HISTORY;
     push @history_files, $home_file if -f $home_file;
     my @sessions;
     for my $file (@history_files) {
-        (my $cwd = $file) =~ s|/\.aider\.chat\.history\.md$||;
+        my $cwd = File::Basename::dirname($file);
         push @sessions,
             App::Saisons::cached_parse($file, sub { _parse_history_file($file, $cwd, $self) });
     }
@@ -41,7 +44,7 @@ sub _find_history_files {
         for my $entry (readdir $dh) {
             next if $entry eq '.' || $entry eq '..';
             my $path = "$dir/$entry";
-            if (-f $path && $entry eq '.aider.chat.history.md') {
+            if (-f $path && $entry eq HISTORY) {
                 push @result, $path;
             }
             elsif (-d $path && !-l $path && $depth < $maxdepth) {
@@ -70,8 +73,8 @@ sub delete_session {
     open my $fh, '<:utf8', $file or return 0;
     my $content = do { local $/; <$fh> };
     close $fh;
-    my $header = quotemeta($session->{_header});
-    $content =~ s/^$header\n.*?(?=^# aider chat started at |\z)//ms;
+    my $re = _segment_re($session->{_header});
+    $content =~ s/$re//;
     open $fh, '>', $file or return 0;
     print $fh $content;
     close $fh;
@@ -166,5 +169,56 @@ sub _parse_epoch {
     my ($date) = @_;  
     return 0 unless $date =~ /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
     return POSIX::mktime($6, $5, $4, $3, $2-1, $1-1900);
+}
+# One session's part of a history file: its header up to the next header.
+sub _segment_re {
+    my ($header) = @_;
+    return qr/^\Q$header\E\n.*?(?=^# aider chat started at |\z)/ms;
+}
+sub _slurp {
+    my ($file) = @_;
+    open my $fh, '<:raw', $file or return undef;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    return $content;
+}
+sub export_sessions {
+    my ($self, $sessions, $dir) = @_;
+    my $n = 0;
+    return map {
+        my $content = _slurp($_->{_file}) // '';
+        my $re = _segment_re($_->{_header});
+        my ($segment) = $content =~ /($re)/;
+        my $file = sprintf 'session-%04d.md', ++$n;
+        open my $out, '>:raw', "$dir/$file" or die "Cannot write $dir/$file: $!\n";
+        print $out $segment // "$_->{_header}\n";
+        close $out;
+        App::Saisons::Transfer::entry($_, file => $file, header => $_->{_header});
+    } @$sessions;
+}
+# Aider keeps its history inside the project folder, so a session can only
+# go back once that folder exists. Sessions are merged in date order.
+sub import_sessions {
+    my ($self, $entries, $dir, $map) = @_;
+    return App::Saisons::Transfer::import_each($entries, sub {
+        my ($e) = @_;
+        my $cwd = $map->($e->{cwd});
+        return ('skipped', "project folder $cwd is missing") unless -d $cwd;
+        my $target  = "$cwd/" . HISTORY;
+        my $content = _slurp($target) // '';
+        return 'exists' if $content =~ /^\Q$e->{header}\E$/m;
+        my $segment = _slurp("$dir/" . App::Saisons::Transfer::safe_rel($e->{file}))
+            // die "Missing $e->{file} in bundle\n";
+        $segment .= "\n" unless $segment =~ /\n\z/;
+        my @parts = split /(?=^# aider chat started at )/m, $content;
+        my $pre   = @parts && $parts[0] !~ /^# aider chat started at / ? shift @parts : '';
+        $_ .= "\n" for grep { !/\n\z/ } @parts;
+        my $tmp = "$target.saisons-$$";
+        open my $out, '>:raw', $tmp or die "Cannot write $tmp: $!\n";
+        print $out $pre, sort { ($a =~ /^(.*)/)[0] cmp ($b =~ /^(.*)/)[0] } @parts, $segment;
+        close $out or die "Cannot write $tmp: $!\n";
+        rename $tmp, $target or die "Cannot write $target: $!\n";
+        return 'imported';
+    });
 }
 1;

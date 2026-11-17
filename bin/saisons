@@ -17,8 +17,14 @@ use Module::Pluggable (
 use App::Saisons;
 use App::Saisons::UI;
 use App::Saisons::Launcher ();
+use App::Saisons::Transfer ();
+use Getopt::Long ();
 
-if (@ARGV && $ARGV[0] eq '--version') {
+my %opt;
+Getopt::Long::GetOptions(\%opt, 'version', 'export:s', 'import=s', 'clone!', 'dry-run')
+    or die "Usage: saisons [--export [FILE]] [--import FILE [--clone|--no-clone] [--dry-run]] [--version]\n";
+
+if ($opt{version}) {
     print 'saisons ' . App::Saisons::version_string() . "\n";
     exit 0;
 }
@@ -39,6 +45,22 @@ sub load_sessions {
     @sessions = sort { $b->{date} cmp $a->{date} } @sessions;
     App::Saisons::UI::annotate_running(\@sessions, \%running);
     return (\@sessions, \%running);
+}
+
+# ── export / import ──────────────────────────────────────────────────────────
+
+if (exists $opt{export}) {
+    my ($sessions) = load_sessions();
+    die "No sessions found.\n" unless @$sessions;
+    my $file = length $opt{export} ? $opt{export} : App::Saisons::Transfer::default_file();
+    my $r = App::Saisons::Transfer::export_sessions($sessions, $file);
+    print map { "$_\n" } App::Saisons::Transfer::export_summary($r);
+    exit 0;
+}
+if (defined $opt{import}) {
+    my @results = App::Saisons::Transfer::import_bundle($opt{import}, \@adapters,
+        clone => $opt{clone}, dry_run => $opt{'dry-run'});
+    exit((grep { $_->{status} eq 'error' } @results) ? 1 : 0);
 }
 
 # ── detect launcher ───────────────────────────────────────────────────────────
@@ -91,6 +113,8 @@ saisons - browse and resume AI coding agent sessions from one list
 =head1 SYNOPSIS
 
     saisons
+    saisons --export [FILE]
+    saisons --import FILE [--clone | --no-clone] [--dry-run]
     saisons --version
 
 =head1 DESCRIPTION
@@ -119,10 +143,32 @@ environment.
     ENTER            open selected   t        cycle grouping
     v                view history    r        refresh running markers
     d                delete          m        move to other directory
+    e                export to a file
     q / ESC          quit
 
 With a filter or search active, ENTER, delete and move act only on the
-selected sessions it shows.
+selected sessions it shows. Export takes the marked sessions, or all shown
+ones if none are marked.
+
+=head1 MOVING SESSIONS TO ANOTHER MACHINE
+
+C<--export> writes every session to one C<.tar.gz> file, named after the
+host and date unless you give a name. Copy the file over and run
+C<--import> there.
+
+Import adds the sessions next to the ones already there and skips any
+that are already there. Paths under the old home directory are changed to
+the new one.
+
+Before importing, it reports each project folder the sessions use: there,
+missing with the C<git clone> command to get it back, missing and not in
+git, or a repo that lacks the commit the source was on. It warns about
+uncommitted and unpushed work on the source. It then offers to clone the
+missing repos; C<--clone> and C<--no-clone> answer for you. C<--dry-run>
+shows the report and imports nothing.
+
+Aider sessions live in the project folder and are skipped until it
+exists; import again once it does. Logins and API keys are not exported.
 
 =head1 ENVIRONMENT
 

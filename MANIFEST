@@ -8,6 +8,7 @@ lib/App/Saisons/Adapter/Gemini.pm
 lib/App/Saisons/Adapter/HOWTO.md
 lib/App/Saisons/Adapter/Opencode.pm
 lib/App/Saisons/Launcher.pm
+lib/App/Saisons/Transfer.pm
 lib/App/Saisons/UI.pm
 LICENSE
 Makefile.PL
@@ -26,3 +27,4 @@ t/fixtures/gemini/.gemini/tmp/myproject-abc123/chats/session-2026-01-15T10-30-ab
 t/fixtures/opencode/.local/share/opencode/storage/session/global/dddddddd-eeee-ffff-0000-111111111111.json
 t/running.t
 t/search.t
+t/transfer.t

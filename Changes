@@ -1,5 +1,12 @@
 Revision history for App-Saisons
 
+Unreleased
+    - New: saisons --export writes your sessions to one file and
+      saisons --import adds them on another machine; e exports from the
+      list.
+    - New: import shows which project folders are missing, with the
+      git clone command for each, and can clone them for you.
+
 0.3.0  2026-11-04
     - New: the running bullet shows state — yellow while the agent is
       working, green when it waits for your input.

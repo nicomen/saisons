@@ -19,6 +19,7 @@ Supports [Claude Code](https://claude.ai/code), [Aider](https://aider.chat), [Op
 - Peek at conversation history before opening (`v`)
 - Move sessions between directories (`m`)
 - Delete sessions (`d`)
+- Export sessions to a file and import them on another machine (`e`, `--export`, `--import`)
 - Remembers selection and view mode across restarts
 - Auto-detects tmux, screen, Tilix, Ptyxis, gnome-terminal, iTerm2, and Terminal.app
 
@@ -99,6 +100,7 @@ saisons
 | `v` | View conversation history |
 | `m` | Move session(s) to a different directory |
 | `d` | Delete selected sessions |
+| `e` | Export selected sessions (all shown if none marked) to a file |
 | `/` | Incremental filter (title, path, date) |
 | `?` | Full-text search (scans session files) |
 | `q` / `ESC` | Quit (selection is remembered) |
@@ -127,6 +129,45 @@ SAISONS_LAUNCHER=inline saisons
 # (the old name CLAUDE_SESSIONS_LAUNCHER still works)
 ```
 
+## Moving sessions to another machine
+
+Export your sessions into one file, copy it over, and import it there:
+
+```sh
+saisons --export                      # all sessions, to saisons-<host>-<date>.tar.gz
+saisons --export sessions.tar.gz      # or name the file
+saisons --import sessions.tar.gz      # on the other machine
+```
+
+In the list, `e` exports the marked sessions, or every session shown if
+none are marked.
+
+Import adds sessions next to the ones already there. Sessions that are
+already there are left alone, so running it twice is safe. If your home
+directory has a different path on the new machine, paths under it are
+changed to match, so resume still works.
+
+Sessions only resume inside their project folder, so import checks each
+one first. For every project it says whether the folder is there, and if
+not, how to get it:
+
+- a git repo with a remote: the `git clone` command, with the branch
+  you were on
+- a repo that is there but doesn't have your latest commit yet: a reminder
+  to pull
+- a folder that isn't in git: a note to copy it by hand
+
+It also warns when the source had uncommitted or unpushed work, since a
+clone won't include it.
+
+Import asks whether to clone the missing repos. Use `--clone` or
+`--no-clone` to skip the question, and `--dry-run` to see the report
+without importing anything. Aider keeps its history inside the project
+folder, so Aider sessions are skipped until the folder exists. Run the
+import again once it does.
+
+Logins and API keys are not exported.
+
 ## Supported agents
 
 | Agent | Sessions stored in | Resume command |
@@ -145,7 +186,7 @@ The opencode adapter reads its SQLite database via the `sqlite3` CLI, which must
 
 See [`lib/App/Saisons/Adapter/HOWTO.md`](lib/App/Saisons/Adapter/HOWTO.md) for a copy-paste template. In short:
 
-1. Create `lib/App/Saisons/Adapter/MyAgent.pm` implementing six methods: `name`, `find_sessions`, `running`, `launch`, `delete_session`, `load_messages`
+1. Create `lib/App/Saisons/Adapter/MyAgent.pm` implementing six methods: `name`, `find_sessions`, `running`, `launch`, `delete_session`, `load_messages`. Add `export_sessions` and `import_sessions` to support moving sessions between machines.
 2. Add it to the `@adapters` list in `saisons`
 3. Optionally add a brand color entry to `%ADAPTER_TAGS` in `lib/App/Saisons/UI.pm`
 
