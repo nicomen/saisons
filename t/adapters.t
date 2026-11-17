@@ -267,6 +267,9 @@ INSERT INTO message VALUES ('msg_du1','ses_defa0000000000001',1768475001000,'{"r
 INSERT INTO part VALUES ('part_du1a','msg_du1','ses_defa0000000000001',1768475001100,'{"type":"text","text":"  Who moved my cheese?\n\nreally  "}');
 SQL
     ok(system($exe, $db, $extra) == 0, 'opencode: built default-title fixture');
+    # written behind saisons' back within the same second: where mtimes are
+    # whole seconds (Solaris) the cache cannot see it, so drop it
+    App::Saisons::forget_parse($db);
     my @derived = $adapter->find_sessions;
     ok(@derived == 1, 'opencode: found derived-title session');
     is($derived[0]{title}, 'Who moved my cheese? really', 'opencode: default title derived from first user message');
@@ -275,6 +278,7 @@ SQL
 INSERT INTO session VALUES ('ses_empt0000000000001','/home/user/myproject','New session - 2026-01-15T11:00:00.000Z',1768475200000,1768475300000,NULL);
 SQL
     ok(system($exe, $db, $blank) == 0, 'opencode: built no-text fixture');
+    App::Saisons::forget_parse($db);
     my ($empty) = grep { $_->{id} eq 'ses_empt0000000000001' } $adapter->find_sessions;
     is($empty->{title}, '(no title)', 'opencode: default title without user text falls back to (no title)');
 };
